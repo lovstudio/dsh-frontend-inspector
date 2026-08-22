@@ -1,0 +1,35 @@
+{
+  "name": "@lovstudio/dsh-frontend-inspector",
+  "description": "Lovstudio dev click-to-source for DeepSeek Harness web: runtime-only, reads React _debugSource on Shift+Option click and opens the editor. No build-time markers; works in vite dev (jsxDEV __source).",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "cordis.patch.yml"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lovstudio/dsh-frontend-inspector.git"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "frontend-inspector",
+    "lovinsp",
+    "click-to-source"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  }
+}

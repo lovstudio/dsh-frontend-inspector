@@ -1,0 +1,10 @@
+# Registers the Lovstudio frontend-inspector host plugin. It serves the LovInsp
+# IDE-bridge client script at /lovinsp-inject.js and taps the index HTML to load
+# it when the `frontend-inspector.enabled` setting resolves true. Requires a web
+# server host row (the dsh-web-app bundle provides the `webServer` service).
+
+- insert:
+    - id: frontend-inspector
+      name: '@lovstudio/dsh-frontend-inspector'
+      config:
+        enabled: true
