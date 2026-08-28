@@ -1,7 +1,7 @@
 {
   "name": "@lovstudio/dsh-frontend-inspector",
   "description": "Lovstudio dev click-to-source for DeepSeek Harness web: runtime-only, reads React _debugSource on Shift+Option click and opens the editor. No build-time markers; works in vite dev (jsxDEV __source).",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "index.js",
   "files": [
@@ -31,5 +31,11 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
   }
 }
