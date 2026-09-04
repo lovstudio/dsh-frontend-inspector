@@ -21,7 +21,16 @@ The DSH checkout is read-only input. Generated files, Vite cache, and Lovinsp st
 
 ## Install
 
-This is a developer tool: it needs a DeepSeek Harness **source checkout** and a resident Vite process, so it does not apply to `npx @deepseek-ai/dsh` installations.
+This plugin needs a DeepSeek Harness **source checkout** (it rebuilds the Web shell with source markers), so it does not apply to `npx @deepseek-ai/dsh` installations. From the checkout:
+
+```sh
+git clone --depth 1 --branch dsh-v0.1.2-rc.1 https://github.com/deepseek-ai/deepseek-harness.git
+cd deepseek-harness && pnpm install && pnpm run build
+pnpm dsh plugin --profile web add --allow-build=esbuild github:lovstudio/dsh-frontend-inspector#v0.1.2
+pnpm dsh web
+```
+
+`--allow-build=esbuild` is required on pnpm 10+, which otherwise refuses esbuild's install script and makes `dsh plugin` abort before registering the bundle.
 
 Install this repository as a bundle in the `web` profile:
 
