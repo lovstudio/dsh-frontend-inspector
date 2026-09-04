@@ -21,6 +21,8 @@ The DSH checkout is read-only input. Generated files, Vite cache, and Lovinsp st
 
 ## Install
 
+This is a developer tool: it needs a DeepSeek Harness **source checkout** and a resident Vite process, so it does not apply to `npx @deepseek-ai/dsh` installations.
+
 Install this repository as a bundle in the `web` profile:
 
 ```sh
