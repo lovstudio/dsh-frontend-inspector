@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { mkdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { extname, join, normalize, resolve, sep } from "node:path";
+import { dirname, extname, join, normalize, posix, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "@babel/parser";
 import z from "@deepseek-ai/schemastery";
@@ -13,10 +13,19 @@ import MagicString from "magic-string";
 * @lovstudio/dsh-frontend-inspector — production click-to-source for the DSH
 * Web surface without modifying the DeepSeek Harness checkout.
 *
-* The Host plugin starts a persistent Lovinsp/Vite build whose output lives
-* under DSH_HOME, serves that output on a named webServer route, and rewrites
-* only the shell asset tags in the authenticated index page. DSH keeps owning
-* boot-data injection and its official static fallback.
+* Two modes, chosen at startup by whether a harness source checkout is found:
+*
+* - **checkout**: a persistent Lovinsp/Vite build of `apps/web` lives under
+*   DSH_HOME, is served on a named webServer route, and only the shell asset
+*   tags in the authenticated index page are swapped. Markers carry exact
+*   TypeScript positions from source maps and clicks open the editor.
+* - **npx** (no checkout, e.g. `npx @deepseek-ai/dsh`): nothing is rebuilt.
+*   The Lovinsp overlay is inlined into the index page, plugin bundles are
+*   marked from the `//#region` file markers tsdown leaves in the published
+*   `lib/client.js`, and a click opens the file on GitHub at the installed
+*   harness version. File-level only: published packages ship no source maps.
+*
+* DSH keeps owning boot-data injection and its official static fallback.
 * @module @lovstudio/dsh-frontend-inspector
 */
 /** Stable Cordis plugin name. */
@@ -27,12 +36,16 @@ const SHELL_PATH = "/lovinsp-shell";
 const PLUGIN_PATH = "/lovinsp-plugins";
 /** Settings namespace carrying the frontend inspector's enable switch. */
 const INSPECTOR_SETTINGS_NAMESPACE = "frontend-inspector";
+/** Where the published harness packages come from; `repository.url` in their manifests. */
+const HARNESS_REPOSITORY = "https://github.com/deepseek-ai/deepseek-harness";
 const Config = z.object({
 	enabled: z.boolean().default(true),
 	sourceRoot: z.string(),
 	port: z.natural().max(65535).default(5678),
 	editor: z.string().default("vscode"),
-	startupTimeoutMs: z.natural().default(12e4)
+	startupTimeoutMs: z.natural().default(12e4),
+	repository: z.string().default(HARNESS_REPOSITORY),
+	sourceRef: z.string()
 });
 /** Schema of the frontend-inspector settings section. */
 const INSPECTOR_SETTINGS_SCHEMA = z.object({ enabled: z.boolean().default(true) });
@@ -137,11 +150,72 @@ function sectionIdAtLine(sourceMap, line, ids) {
 	}
 	return selected === void 0 ? void 0 : ids[selected];
 }
-/** Add Lovinsp DOM markers to one loader combo script using its indexed map. */
-function instrumentClientBundle(code, sourceMap, modules, sourcePath) {
-	let ast;
+/** Read `repository.url` / `repository.directory` of the package serving `id`. */
+function packageOrigin(modules, id, cache) {
+	const cached = cache.get(id);
+	if (cached !== void 0) return cached;
+	let origin = {};
+	const clientPath = modules.clientPath(id);
+	if (clientPath !== void 0) try {
+		const manifest = JSON.parse(readFileSync(join(clientPath, "..", "..", "package.json"), "utf8"));
+		origin = {
+			repository: (typeof manifest.repository === "string" ? manifest.repository : manifest.repository?.url)?.replace(/^git\+/u, "").replace(/\.git$/u, ""),
+			directory: typeof manifest.repository === "object" ? manifest.repository?.directory : void 0
+		};
+	} catch {}
+	cache.set(id, origin);
+	return origin;
+}
+/**
+* Every match of a global `pattern` (one capture group) with the 1-based line
+* it starts on; multi-line matches such as a loader call whose `id:` sits on
+* the next line anchor to their first line.
+*/
+function scanCode(code, pattern) {
+	const anchors = [];
+	let line = 1;
+	let scanned = 0;
+	for (const match of code.matchAll(pattern)) {
+		const value = match[1];
+		if (value === void 0) continue;
+		for (let i = scanned; i < match.index; i++) if (code.charCodeAt(i) === 10) line++;
+		scanned = match.index;
+		anchors.push({
+			line,
+			value
+		});
+	}
+	return anchors;
+}
+/** The last anchor at or before `line`. */
+function anchorAt(anchors, line) {
+	let found;
+	for (const anchor of anchors) {
+		if (anchor.line > line) break;
+		found = anchor.value;
+	}
+	return found;
+}
+/**
+* Map one tsdown `//#region` marker of a published bundle onto a path inside
+* the package's repository. Own files appear as tsc output (`lib/types/…/x.js`),
+* so they go back to `src/…/x.tsx` — the marker sits on a JSX call, hence the
+* extension; cross-package files appear relative to the package directory.
+* @param region - the marker text after `//#region `.
+* @param directory - `repository.directory` of the package.
+* @returns the repository-relative file, or undefined for CSS modules and escapes.
+*/
+function repositoryPathFor(region, directory) {
+	if (region.startsWith("\0") || region.includes("\\0")) return void 0;
+	const own = /^(?:\.\/)?lib\/types\/(.+)\.js$/u.exec(region);
+	const relative = own === null ? region : `src/${own[1]}.tsx`;
+	const path = posix.normalize(posix.join(directory, relative));
+	return path.startsWith("..") || path.startsWith("/") ? void 0 : path;
+}
+/** Parse one combo script; undefined when Babel cannot recover a tree. */
+function parseBundle(code) {
 	try {
-		ast = parse(code, {
+		return parse(code, {
 			sourceType: "unambiguous",
 			allowAwaitOutsideFunction: true,
 			errorRecovery: true,
@@ -153,11 +227,11 @@ function instrumentClientBundle(code, sourceMap, modules, sourcePath) {
 			]
 		});
 	} catch {
-		return code;
+		return;
 	}
-	const map = AnyMap(sourceMap, "");
-	const ids = comboIds(sourcePath);
-	const output = new MagicString(code);
+}
+/** Visit every host-DOM JSX call of a parsed bundle with its start position. */
+function eachDomJsxCall(ast, visit) {
 	walk(ast, (node) => {
 		if (node.type !== "CallExpression" || !Array.isArray(node.arguments) || node.arguments.length < 2) return;
 		const callee = node.callee;
@@ -168,14 +242,58 @@ function instrumentClientBundle(code, sourceMap, modules, sourcePath) {
 		if (hasInspectorPath(props) || typeof props.start !== "number") return;
 		const loc = node.loc;
 		if (typeof loc?.start?.line !== "number" || typeof loc.start.column !== "number") return;
-		const original = originalPositionFor(map, {
+		visit({
+			tag,
+			propsStart: props.start,
 			line: loc.start.line,
 			column: loc.start.column
 		});
+	});
+}
+const MARKER_ATTRIBUTE = JSON.stringify("data-insp-path");
+/** Add Lovinsp DOM markers to one loader combo script using its indexed map (checkout mode). */
+function instrumentClientBundle(code, sourceMap, modules, sourcePath) {
+	const ast = parseBundle(code);
+	if (ast === void 0) return code;
+	const map = AnyMap(sourceMap, "");
+	const ids = comboIds(sourcePath);
+	const output = new MagicString(code);
+	eachDomJsxCall(ast, ({ tag, propsStart, line, column }) => {
+		const original = originalPositionFor(map, {
+			line,
+			column
+		});
 		if (original.source === null || original.line === null || original.column === null) return;
-		const sectionId = sectionIdAtLine(sourceMap, loc.start.line, ids);
+		const sectionId = sectionIdAtLine(sourceMap, line, ids);
 		const marker = `${localPluginSource(original.source, modules, sectionId)}:${String(original.line)}:${String(original.column + 1)}:${tag}`;
-		output.appendLeft(props.start + 1, `${JSON.stringify("data-insp-path")}:${JSON.stringify(marker)},`);
+		output.appendLeft(propsStart + 1, `${MARKER_ATTRIBUTE}:${JSON.stringify(marker)},`);
+	});
+	return output.toString();
+}
+/**
+* Add Lovinsp DOM markers to one loader combo script from its `//#region`
+* markers (npx mode): the file is exact, the line is the compiled one.
+* Only packages published from `repository` get markers; a click on anything
+* else would open the wrong repository.
+*/
+function instrumentPublishedBundle(code, modules, sourcePath, repository, origins = /* @__PURE__ */ new Map()) {
+	const ast = parseBundle(code);
+	if (ast === void 0) return code;
+	const ids = comboIds(sourcePath);
+	const sections = scanCode(code, /__ModuleLoader__\.load\(\{\s*id:\s*"([^"]+)"/gu);
+	const regions = scanCode(code, /^[ \t]*\/\/#region (.+?)[ \t]*$/gmu);
+	const output = new MagicString(code);
+	eachDomJsxCall(ast, ({ tag, propsStart, line, column }) => {
+		const sectionId = anchorAt(sections, line) ?? (ids.length === 1 ? ids[0] : void 0);
+		if (sectionId === void 0) return;
+		const origin = packageOrigin(modules, sectionId, origins);
+		if (origin.repository !== repository || origin.directory === void 0) return;
+		const region = anchorAt(regions, line);
+		if (region === void 0) return;
+		const file = repositoryPathFor(region, origin.directory);
+		if (file === void 0) return;
+		const marker = `${file}:${String(line)}:${String(column + 1)}:${tag}`;
+		output.appendLeft(propsStart + 1, `${MARKER_ATTRIBUTE}:${JSON.stringify(marker)},`);
 	});
 	return output.toString();
 }
@@ -183,7 +301,7 @@ async function fetchLocalAsset(port, path) {
 	return fetch(`http://127.0.0.1:${String(port)}${path}`);
 }
 /** Proxy and instrument one client-module combo response. */
-async function serveInstrumentedPlugin(req, res, port, modules, cache) {
+async function serveInstrumentedPlugin(req, res, port, modules, cache, mode, origins) {
 	if (req.method !== "GET" && req.method !== "HEAD") {
 		res.writeHead(405).end();
 		return;
@@ -207,7 +325,8 @@ async function serveInstrumentedPlugin(req, res, port, modules, cache) {
 		if (originalPath.includes("client.js.map")) {
 			body = Buffer.from(source);
 			contentType = "application/json";
-		} else {
+		} else if (mode.kind === "npx") body = Buffer.from(instrumentPublishedBundle(source, modules, originalPath, mode.repository, origins));
+		else {
 			const mapPath = /\/\/# sourceMappingURL=([^\s]+)/u.exec(source)?.[1];
 			if (mapPath === void 0) body = Buffer.from(source);
 			else {
@@ -378,6 +497,63 @@ function injectInstrumentedShell(html, instrumentedIndex) {
 	if (!replaced) throw new Error("frontend-inspector: DSH index has no module entry");
 	return out.replaceAll("/plugins/", `${PLUGIN_PATH}/plugins/`);
 }
+/**
+* npx mode: keep DSH's own shell, inline the Lovinsp overlay ahead of it, and
+* route plugin bundles through the marking proxy.
+* @param html - the authenticated DSH index page.
+* @param overlayScript - the self-contained script `@lovinsp/core` generates.
+*/
+function injectOverlay(html, overlayScript) {
+	const tag = `<script>${overlayScript.replaceAll("<\/script", "<\\/script")}<\/script>`;
+	return (/<\/head>/iu.test(html) ? html.replace(/<\/head>/iu, `${tag}</head>`) : `${tag}${html}`).replaceAll("/plugins/", `${PLUGIN_PATH}/plugins/`);
+}
+/**
+* The git ref matching the running harness: `dsh-v<version>` of the
+* `@deepseek-ai/dsh` package that launched this process, else `master`.
+* @param entry - the launcher script; defaults to `process.argv[1]`.
+*/
+function detectHarnessRef(entry = process.argv[1]) {
+	let dir;
+	if (entry !== void 0) try {
+		dir = dirname(realpathSync(entry));
+	} catch {
+		dir = dirname(resolve(entry));
+	}
+	while (dir !== void 0) {
+		const manifest = join(dir, "package.json");
+		if (existsSync(manifest)) try {
+			const parsed = JSON.parse(readFileSync(manifest, "utf8"));
+			if (parsed.name === "@deepseek-ai/dsh" && typeof parsed.version === "string") return `dsh-v${parsed.version}`;
+		} catch {}
+		const parent = dirname(dir);
+		dir = parent === dir ? void 0 : parent;
+	}
+	return "master";
+}
+/** Build the inlined overlay for npx mode: copy path or open the file on GitHub, never a local editor. */
+async function overlayScript(config, ref) {
+	const { getWebComponentCode } = await import("@lovinsp/core");
+	const repository = (config.repository ?? "https://github.com/deepseek-ai/deepseek-harness").replace(/\/$/u, "");
+	const port = config.port ?? 5678;
+	return getWebComponentCode({
+		bundler: "vite",
+		port,
+		showSwitch: true,
+		hideConsole: false,
+		editor: config.editor,
+		behavior: {
+			locate: false,
+			copy: true,
+			target: `${repository}/blob/${ref}/{file}`,
+			defaultAction: "target",
+			keys: { target: [
+				"shiftKey",
+				"altKey",
+				"metaKey"
+			] }
+		}
+	}, port).replace(/inspector\.targetKeys = '[^']*';/u, `inspector.targetKeys = (/mac|iphone|ipad|ipod/i.test(navigator.userAgent)) ? 'shiftKey,altKey,metaKey' : 'shiftKey,altKey,ctrlKey';`);
+}
 /** Mount the build watcher, instrumented asset route, and authenticated index transform. */
 async function apply(ctx, config) {
 	let readSection = () => ({ enabled: config.enabled ?? true });
@@ -388,36 +564,49 @@ async function apply(ctx, config) {
 	});
 	if (config.enabled === false) return;
 	const sourceRoot = resolveSourceRoot(config.sourceRoot);
-	if (sourceRoot === void 0) throw new Error("frontend-inspector: sourceRoot must name a clean DeepSeek Harness checkout (or launch dsh from that checkout)");
 	const cacheRoot = resolveCacheRoot();
 	const distRoot = join(cacheRoot, "dist");
-	await ctx.effect(async () => {
-		const builder = await startBuilder(config, sourceRoot, cacheRoot);
-		return async () => {
-			await stopBuilder(builder);
+	let mode;
+	let overlay = "";
+	if (sourceRoot === void 0) {
+		const ref = config.sourceRef ?? detectHarnessRef();
+		mode = {
+			kind: "npx",
+			repository: (config.repository ?? "https://github.com/deepseek-ai/deepseek-harness").replace(/\/$/u, "")
 		};
-	}, "frontend-inspector: persistent Lovinsp shell build");
+		overlay = await overlayScript(config, ref);
+		console.info(`frontend-inspector: no harness checkout found, marking published bundles; clicks open ${mode.repository}/blob/${ref}`);
+	} else {
+		mode = { kind: "checkout" };
+		await ctx.effect(async () => {
+			const builder = await startBuilder(config, sourceRoot, cacheRoot);
+			return async () => {
+				await stopBuilder(builder);
+			};
+		}, "frontend-inspector: persistent Lovinsp shell build");
+	}
 	ctx.inject(["webServer", "clientModules"], (httpCtx) => {
 		httpCtx.effect(() => {
 			const modules = httpCtx.get("clientModules");
 			const pluginCache = /* @__PURE__ */ new Map();
-			const removeRoute = httpCtx.webServer.register({
+			const origins = /* @__PURE__ */ new Map();
+			const removeRoute = mode.kind === "checkout" ? httpCtx.webServer.register({
 				kind: "prefix",
 				path: SHELL_PATH,
 				handler: async (req, res) => {
 					await serveInstrumentedAsset(req, res, distRoot);
 				}
-			});
+			}) : () => {};
 			const removePluginRoute = httpCtx.webServer.register({
 				kind: "prefix",
 				path: PLUGIN_PATH,
 				handler: async (req, res) => {
-					await serveInstrumentedPlugin(req, res, httpCtx.webServer.port, modules, pluginCache);
+					await serveInstrumentedPlugin(req, res, httpCtx.webServer.port, modules, pluginCache, mode, origins);
 				}
 			});
 			const removeTap = httpCtx.webServer.tapIndex((html) => {
 				if (readSection().enabled !== true) return html;
-				return injectInstrumentedShell(html, readFileSync(join(distRoot, "index.html"), "utf8"));
+				return mode.kind === "checkout" ? injectInstrumentedShell(html, readFileSync(join(distRoot, "index.html"), "utf8")) : injectOverlay(html, overlay);
 			});
 			return () => {
 				removeRoute();
@@ -428,4 +617,4 @@ async function apply(ctx, config) {
 	});
 }
 //#endregion
-export { Config, INSPECTOR_SETTINGS_NAMESPACE, INSPECTOR_SETTINGS_SCHEMA, PLUGIN_PATH, SHELL_PATH, apply, injectInstrumentedShell, name };
+export { Config, HARNESS_REPOSITORY, INSPECTOR_SETTINGS_NAMESPACE, INSPECTOR_SETTINGS_SCHEMA, PLUGIN_PATH, SHELL_PATH, apply, detectHarnessRef, injectInstrumentedShell, injectOverlay, instrumentPublishedBundle, name, repositoryPathFor };

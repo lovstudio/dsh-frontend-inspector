@@ -17,9 +17,12 @@ importers:
       '@jridgewell/trace-mapping':
         specifier: ^0.3.30
         version: 0.3.31
+      '@lovinsp/core':
+        specifier: 1.8.0
+        version: 1.8.0(supports-color@7.2.0)
       lovinsp:
         specifier: ^1.8.0
-        version: 1.8.0
+        version: 1.8.0(supports-color@7.2.0)
       magic-string:
         specifier: ^0.30.19
         version: 0.30.21
@@ -722,45 +725,45 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.6.0
 
-  '@lovinsp/core@1.8.0':
+  '@lovinsp/core@1.8.0(supports-color@7.2.0)':
     dependencies:
       '@vue/compiler-dom': 3.5.42
       chalk: 4.1.1
       dotenv: 16.6.1
       launch-ide: 1.2.0
-      portfinder: 1.0.38
+      portfinder: 1.0.38(supports-color@7.2.0)
     transitivePeerDependencies:
       - supports-color
 
-  '@lovinsp/esbuild@1.8.0':
+  '@lovinsp/esbuild@1.8.0(supports-color@7.2.0)':
     dependencies:
-      '@lovinsp/core': 1.8.0
+      '@lovinsp/core': 1.8.0(supports-color@7.2.0)
     transitivePeerDependencies:
       - supports-color
 
-  '@lovinsp/mako@1.8.0':
+  '@lovinsp/mako@1.8.0(supports-color@7.2.0)':
     dependencies:
-      '@lovinsp/core': 1.8.0
+      '@lovinsp/core': 1.8.0(supports-color@7.2.0)
     transitivePeerDependencies:
       - supports-color
 
-  '@lovinsp/turbopack@1.8.0':
+  '@lovinsp/turbopack@1.8.0(supports-color@7.2.0)':
     dependencies:
-      '@lovinsp/core': 1.8.0
-      '@lovinsp/webpack': 1.8.0
+      '@lovinsp/core': 1.8.0(supports-color@7.2.0)
+      '@lovinsp/webpack': 1.8.0(supports-color@7.2.0)
     transitivePeerDependencies:
       - supports-color
 
-  '@lovinsp/vite@1.8.0':
+  '@lovinsp/vite@1.8.0(supports-color@7.2.0)':
     dependencies:
-      '@lovinsp/core': 1.8.0
+      '@lovinsp/core': 1.8.0(supports-color@7.2.0)
       chalk: 4.1.1
     transitivePeerDependencies:
       - supports-color
 
-  '@lovinsp/webpack@1.8.0':
+  '@lovinsp/webpack@1.8.0(supports-color@7.2.0)':
     dependencies:
-      '@lovinsp/core': 1.8.0
+      '@lovinsp/core': 1.8.0(supports-color@7.2.0)
     transitivePeerDependencies:
       - supports-color
 
@@ -989,9 +992,11 @@ snapshots:
 
   color-name@1.1.4: {}
 
-  debug@4.4.3:
+  debug@4.4.3(supports-color@7.2.0):
     dependencies:
       ms: 2.1.3
+    optionalDependencies:
+      supports-color: 7.2.0
 
   defu@6.1.7: {}
 
@@ -1024,14 +1029,14 @@ snapshots:
       chalk: 4.1.1
       dotenv: 16.6.1
 
-  lovinsp@1.8.0:
+  lovinsp@1.8.0(supports-color@7.2.0):
     dependencies:
-      '@lovinsp/core': 1.8.0
-      '@lovinsp/esbuild': 1.8.0
-      '@lovinsp/mako': 1.8.0
-      '@lovinsp/turbopack': 1.8.0
-      '@lovinsp/vite': 1.8.0
-      '@lovinsp/webpack': 1.8.0
+      '@lovinsp/core': 1.8.0(supports-color@7.2.0)
+      '@lovinsp/esbuild': 1.8.0(supports-color@7.2.0)
+      '@lovinsp/mako': 1.8.0(supports-color@7.2.0)
+      '@lovinsp/turbopack': 1.8.0(supports-color@7.2.0)
+      '@lovinsp/vite': 1.8.0(supports-color@7.2.0)
+      '@lovinsp/webpack': 1.8.0(supports-color@7.2.0)
       chalk: 4.1.1
     transitivePeerDependencies:
       - supports-color
@@ -1046,10 +1051,10 @@ snapshots:
 
   picomatch@4.0.7: {}
 
-  portfinder@1.0.38:
+  portfinder@1.0.38(supports-color@7.2.0):
     dependencies:
       async: 3.2.6
-      debug: 4.4.3
+      debug: 4.4.3(supports-color@7.2.0)
     transitivePeerDependencies:
       - supports-color
 

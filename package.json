@@ -1,7 +1,7 @@
 {
   "name": "@lovstudio/dsh-frontend-inspector",
-  "description": "Production click-to-source for DeepSeek Harness Web, delivered as an external-cache Host plugin without modifying the DSH checkout.",
-  "version": "0.1.3",
+  "description": "Click-to-source for DeepSeek Harness Web: exact TypeScript positions and editor jumps from a source checkout, or file-level GitHub jumps on plain npx installs — an external Host plugin that never modifies the DSH checkout.",
+  "version": "0.1.4",
   "type": "module",
   "main": "index.js",
   "files": [
@@ -41,7 +41,8 @@
     "@deepseek-ai/schemastery": "^3.18.1",
     "@jridgewell/trace-mapping": "^0.3.30",
     "lovinsp": "^1.8.0",
-    "magic-string": "^0.30.19"
+    "magic-string": "^0.30.19",
+    "@lovinsp/core": "1.8.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"

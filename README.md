@@ -16,36 +16,42 @@ This plugin uses the supported Host extension points instead:
 - `/lovinsp-shell/*` serves the external shell cache as a named route ahead of the official static fallback.
 - `/lovinsp-plugins/*` proxies Client Module Registry combo bundles, applies their indexed source maps, and adds source markers for independent plugins such as Plugin Marketplace.
 - The Lovinsp bridge stays alive with the Vite watcher and is stopped with the DSH plugin lifecycle.
+- Without a checkout (npx mode) none of the above runs: the overlay script `@lovinsp/core` generates is inlined into the index page, and `/lovinsp-plugins/*` marks bundles from their region markers and `repository.directory` manifests instead of source maps.
 
 The DSH checkout is read-only input. Generated files, Vite cache, and Lovinsp state stay under `DSH_HOME/cache/frontend-inspector`.
 
 ## Install
 
-This plugin needs a DeepSeek Harness **source checkout** (it rebuilds the Web shell with source markers), so it does not apply to `npx @deepseek-ai/dsh` installations. From the checkout:
+Two modes, chosen automatically at startup:
+
+| | Source checkout | Plain `npx @deepseek-ai/dsh` |
+|---|---|---|
+| Markers | exact TypeScript file:line:column from source maps | file only, from the `//#region` markers tsdown leaves in published bundles |
+| Click | opens the file in your editor (`editor`, default `vscode`) | opens the file on GitHub at the installed harness version (`dsh-v<version>`) |
+| Shell | rebuilt once by Vite with markers on the shell's own elements | untouched; only plugin bundles (where nearly all UI lives) carry markers |
+| Requirements | a harness checkout; Vite is resolved from its `apps/web` | nothing beyond the plugin |
+
+Shortcut in both modes: hold **Shift+Option+Command** (Windows: Shift+Alt+Ctrl) and click; **Shift+Alt** + click copies the path instead.
+
+**From a source checkout (exact positions, editor jump):**
 
 ```sh
 git clone --depth 1 --branch dsh-v0.1.2-rc.1 https://github.com/deepseek-ai/deepseek-harness.git
 cd deepseek-harness && pnpm install && pnpm run build
-pnpm dsh plugin --profile web add -w github:lovstudio/dsh-frontend-inspector#v0.1.3
+pnpm dsh plugin --profile web add -w github:lovstudio/dsh-frontend-inspector#v0.1.4
 pnpm dsh web
 ```
 
-Vite is resolved from the checkout (`apps/web/node_modules/vite`) at runtime, so the plugin declares no bundler dependency and pnpm 10+ installs it without approving any build script.
+The checkout is found from `sourceRoot`, `DSH_SOURCE_ROOT`, or the launch directory, in that order; generated files stay under `DSH_HOME/cache/frontend-inspector`.
 
-Install this repository as a bundle in the `web` profile:
-
-```sh
-dsh plugin --profile web add -w link:/absolute/path/to/dsh-frontend-inspector
-```
-
-The plugin discovers the DSH source checkout from `sourceRoot`, `DSH_SOURCE_ROOT`, or the launch working directory, in that order. Starting DSH from the checkout therefore needs no extra configuration:
+**Without a checkout (file-level, GitHub jump):**
 
 ```sh
-cd /absolute/path/to/deepseek-harness
-dsh web
+npx @deepseek-ai/dsh plugin --profile web add -w github:lovstudio/dsh-frontend-inspector#v0.1.4
+npx @deepseek-ai/dsh web
 ```
 
-To launch elsewhere, set `sourceRoot` in the bundle row or export `DSH_SOURCE_ROOT`.
+`repository` (default `https://github.com/deepseek-ai/deepseek-harness`) and `sourceRef` (default derived from the running `@deepseek-ai/dsh` version, else `master`) can be set on the bundle row. Only packages whose manifest names that repository get markers, so a click never opens the wrong project.
 
 ## Configuration
 
@@ -55,13 +61,15 @@ To launch elsewhere, set `sourceRoot` in the bundle row or export `DSH_SOURCE_RO
 | `sourceRoot` | auto | Clean DeepSeek Harness checkout used as read-only source. |
 | `port` | `5678` | Start of Lovinsp's available-port search. |
 | `editor` | `vscode` | Editor identifier passed to Lovinsp. |
-| `startupTimeoutMs` | `120000` | First instrumented build deadline. |
+| `startupTimeoutMs` | `120000` | First instrumented build deadline (checkout mode). |
+| `repository` | harness repo | npx mode: repository a click opens; only packages published from it get markers. |
+| `sourceRef` | `dsh-v<version>` | npx mode: git ref of that repository; falls back to `master` when the running dsh version cannot be read. |
 
 The `frontend-inspector.enabled` settings section can disable index routing without uninstalling the bundle.
 
 ## Use
 
-Lovinsp renders its switch on the page. The default action is IDE location; copy is also enabled. Source markers cover both the official shell and loader-delivered Client plugin bundles when their packages include source maps.
+Lovinsp renders its switch on the page. In checkout mode the default action is IDE location and markers cover both the official shell and plugin bundles (from their source maps). In npx mode the default action opens the file on GitHub and markers cover plugin bundles only, resolved from the `//#region` file markers tsdown leaves in published `lib/client.js` (own files map `lib/types/**/x.js` back to `src/**/x.tsx`). Copy is enabled in both modes.
 
 ## Local development
 

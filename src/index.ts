@@ -2,19 +2,28 @@
  * @lovstudio/dsh-frontend-inspector — production click-to-source for the DSH
  * Web surface without modifying the DeepSeek Harness checkout.
  *
- * The Host plugin starts a persistent Lovinsp/Vite build whose output lives
- * under DSH_HOME, serves that output on a named webServer route, and rewrites
- * only the shell asset tags in the authenticated index page. DSH keeps owning
- * boot-data injection and its official static fallback.
+ * Two modes, chosen at startup by whether a harness source checkout is found:
+ *
+ * - **checkout**: a persistent Lovinsp/Vite build of `apps/web` lives under
+ *   DSH_HOME, is served on a named webServer route, and only the shell asset
+ *   tags in the authenticated index page are swapped. Markers carry exact
+ *   TypeScript positions from source maps and clicks open the editor.
+ * - **npx** (no checkout, e.g. `npx @deepseek-ai/dsh`): nothing is rebuilt.
+ *   The Lovinsp overlay is inlined into the index page, plugin bundles are
+ *   marked from the `//#region` file markers tsdown leaves in the published
+ *   `lib/client.js`, and a click opens the file on GitHub at the installed
+ *   harness version. File-level only: published packages ship no source maps.
+ *
+ * DSH keeps owning boot-data injection and its official static fallback.
  * @module @lovstudio/dsh-frontend-inspector
  */
 
 import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { mkdir, readFile, stat } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { homedir } from 'node:os'
-import { extname, join, normalize, resolve, sep } from 'node:path'
+import { dirname, extname, join, normalize, posix, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parse } from '@babel/parser'
 import type { Context } from '@deepseek-ai/cordis'
@@ -52,7 +61,14 @@ export interface Config {
   editor?: string
   /** Maximum time allowed for the first instrumented shell build. */
   startupTimeoutMs?: number
+  /** npx mode: repository whose files a click opens. */
+  repository?: string
+  /** npx mode: git ref of that repository; omitted derives `dsh-v<installed version>`. */
+  sourceRef?: string
 }
+
+/** Where the published harness packages come from; `repository.url` in their manifests. */
+export const HARNESS_REPOSITORY = 'https://github.com/deepseek-ai/deepseek-harness'
 
 export const Config: z<Config> = z.object({
   enabled: z.boolean().default(true),
@@ -60,6 +76,8 @@ export const Config: z<Config> = z.object({
   port: z.natural().max(65535).default(5678),
   editor: z.string().default('vscode'),
   startupTimeoutMs: z.natural().default(120_000),
+  repository: z.string().default(HARNESS_REPOSITORY),
+  sourceRef: z.string(),
 })
 
 /** Schema of the frontend-inspector settings section. */
@@ -189,27 +207,112 @@ function sectionIdAtLine(sourceMap: unknown, line: number, ids: readonly string[
   return selected === undefined ? undefined : ids[selected]
 }
 
-/** Add Lovinsp DOM markers to one loader combo script using its indexed map. */
-function instrumentClientBundle(
-  code: string,
-  sourceMap: unknown,
-  modules: ClientModulesReader,
-  sourcePath: string,
-): string {
-  let ast: ReturnType<typeof parse>
+/** How markers are resolved: exact positions from a checkout's maps, or repository paths from published bundles. */
+export type InspectorMode =
+  | { readonly kind: 'checkout' }
+  | { readonly kind: 'npx'; readonly repository: string }
+
+/** `repository` fields of one published package manifest, normalized to a plain https URL. */
+interface PackageOrigin {
+  readonly repository?: string
+  readonly directory?: string
+}
+
+/** Read `repository.url` / `repository.directory` of the package serving `id`. */
+function packageOrigin(modules: ClientModulesReader, id: string, cache: Map<string, PackageOrigin>): PackageOrigin {
+  const cached = cache.get(id)
+  if (cached !== undefined) return cached
+  let origin: PackageOrigin = {}
+  const clientPath = modules.clientPath(id)
+  if (clientPath !== undefined) {
+    try {
+      const manifest = JSON.parse(readFileSync(join(clientPath, '..', '..', 'package.json'), 'utf8')) as {
+        repository?: string | { url?: string; directory?: string }
+      }
+      const repository = typeof manifest.repository === 'string' ? manifest.repository : manifest.repository?.url
+      origin = {
+        repository: repository?.replace(/^git\+/u, '').replace(/\.git$/u, ''),
+        directory: typeof manifest.repository === 'object' ? manifest.repository?.directory : undefined,
+      }
+    } catch {
+      // A package without a readable manifest simply gets no markers.
+    }
+  }
+  cache.set(id, origin)
+  return origin
+}
+
+/** Line-ordered anchors found by scanning the combo script text. */
+interface LineAnchor {
+  readonly line: number
+  readonly value: string
+}
+
+/**
+ * Every match of a global `pattern` (one capture group) with the 1-based line
+ * it starts on; multi-line matches such as a loader call whose `id:` sits on
+ * the next line anchor to their first line.
+ */
+function scanCode(code: string, pattern: RegExp): LineAnchor[] {
+  const anchors: LineAnchor[] = []
+  let line = 1
+  let scanned = 0
+  for (const match of code.matchAll(pattern)) {
+    const value = match[1]
+    if (value === undefined) continue
+    for (let i = scanned; i < match.index; i++) if (code.charCodeAt(i) === 10) line++
+    scanned = match.index
+    anchors.push({ line, value })
+  }
+  return anchors
+}
+
+/** The last anchor at or before `line`. */
+function anchorAt(anchors: readonly LineAnchor[], line: number): string | undefined {
+  let found: string | undefined
+  for (const anchor of anchors) {
+    if (anchor.line > line) break
+    found = anchor.value
+  }
+  return found
+}
+
+/**
+ * Map one tsdown `//#region` marker of a published bundle onto a path inside
+ * the package's repository. Own files appear as tsc output (`lib/types/…/x.js`),
+ * so they go back to `src/…/x.tsx` — the marker sits on a JSX call, hence the
+ * extension; cross-package files appear relative to the package directory.
+ * @param region - the marker text after `//#region `.
+ * @param directory - `repository.directory` of the package.
+ * @returns the repository-relative file, or undefined for CSS modules and escapes.
+ */
+export function repositoryPathFor(region: string, directory: string): string | undefined {
+  if (region.startsWith('\0') || region.includes('\\0')) return undefined
+  const own = /^(?:\.\/)?lib\/types\/(.+)\.js$/u.exec(region)
+  const relative = own === null ? region : `src/${own[1]}.tsx`
+  const path = posix.normalize(posix.join(directory, relative))
+  return path.startsWith('..') || path.startsWith('/') ? undefined : path
+}
+
+/** Parse one combo script; undefined when Babel cannot recover a tree. */
+function parseBundle(code: string): ReturnType<typeof parse> | undefined {
   try {
-    ast = parse(code, {
+    return parse(code, {
       sourceType: 'unambiguous',
       allowAwaitOutsideFunction: true,
       errorRecovery: true,
       plugins: ['importAttributes', 'jsx', 'typescript', 'topLevelAwait'],
     })
   } catch {
-    return code
+    return undefined
   }
-  const map = AnyMap(sourceMap as Parameters<typeof AnyMap>[0], '')
-  const ids = comboIds(sourcePath)
-  const output = new MagicString(code)
+}
+
+/** Visit every host-DOM JSX call of a parsed bundle with its start position. */
+function eachDomJsxCall(
+  ast: ReturnType<typeof parse>,
+  visit: (call: { readonly tag: string; readonly propsStart: number; readonly line: number; readonly column: number }) => void,
+): void {
   walk(ast, (node) => {
     if (node.type !== 'CallExpression' || !Array.isArray(node.arguments) || node.arguments.length < 2) return
     const callee = node.callee as Record<string, unknown> | undefined
@@ -220,12 +323,65 @@ function instrumentClientBundle(
     if (hasInspectorPath(props) || typeof props.start !== 'number') return
     const loc = node.loc as { start?: { line?: unknown, column?: unknown } } | undefined
     if (typeof loc?.start?.line !== 'number' || typeof loc.start.column !== 'number') return
-    const original = originalPositionFor(map, { line: loc.start.line, column: loc.start.column })
+    visit({ tag, propsStart: props.start, line: loc.start.line, column: loc.start.column })
+  })
+}
+
+const MARKER_ATTRIBUTE = JSON.stringify('data-insp-path')
+
+/** Add Lovinsp DOM markers to one loader combo script using its indexed map (checkout mode). */
+function instrumentClientBundle(
+  code: string,
+  sourceMap: unknown,
+  modules: ClientModulesReader,
+  sourcePath: string,
+): string {
+  const ast = parseBundle(code)
+  if (ast === undefined) return code
+  const map = AnyMap(sourceMap as Parameters<typeof AnyMap>[0], '')
+  const ids = comboIds(sourcePath)
+  const output = new MagicString(code)
+  eachDomJsxCall(ast, ({ tag, propsStart, line, column }) => {
+    const original = originalPositionFor(map, { line, column })
     if (original.source === null || original.line === null || original.column === null) return
-    const sectionId = sectionIdAtLine(sourceMap, loc.start.line, ids)
+    const sectionId = sectionIdAtLine(sourceMap, line, ids)
     const file = localPluginSource(original.source, modules, sectionId)
     const marker = `${file}:${String(original.line)}:${String(original.column + 1)}:${tag}`
-    output.appendLeft(props.start + 1, `${JSON.stringify('data-insp-path')}:${JSON.stringify(marker)},`)
+    output.appendLeft(propsStart + 1, `${MARKER_ATTRIBUTE}:${JSON.stringify(marker)},`)
+  })
+  return output.toString()
+}
+
+/**
+ * Add Lovinsp DOM markers to one loader combo script from its `//#region`
+ * markers (npx mode): the file is exact, the line is the compiled one.
+ * Only packages published from `repository` get markers; a click on anything
+ * else would open the wrong repository.
+ */
+export function instrumentPublishedBundle(
+  code: string,
+  modules: ClientModulesReader,
+  sourcePath: string,
+  repository: string,
+  origins: Map<string, PackageOrigin> = new Map(),
+): string {
+  const ast = parseBundle(code)
+  if (ast === undefined) return code
+  const ids = comboIds(sourcePath)
+  const sections = scanCode(code, /__ModuleLoader__\.load\(\{\s*id:\s*"([^"]+)"/gu)
+  const regions = scanCode(code, /^[ \t]*\/\/#region (.+?)[ \t]*$/gmu)
+  const output = new MagicString(code)
+  eachDomJsxCall(ast, ({ tag, propsStart, line, column }) => {
+    const sectionId = anchorAt(sections, line) ?? (ids.length === 1 ? ids[0] : undefined)
+    if (sectionId === undefined) return
+    const origin = packageOrigin(modules, sectionId, origins)
+    if (origin.repository !== repository || origin.directory === undefined) return
+    const region = anchorAt(regions, line)
+    if (region === undefined) return
+    const file = repositoryPathFor(region, origin.directory)
+    if (file === undefined) return
+    const marker = `${file}:${String(line)}:${String(column + 1)}:${tag}`
+    output.appendLeft(propsStart + 1, `${MARKER_ATTRIBUTE}:${JSON.stringify(marker)},`)
   })
   return output.toString()
 }
@@ -241,6 +397,8 @@ async function serveInstrumentedPlugin(
   port: number,
   modules: ClientModulesReader,
   cache: Map<string, Buffer>,
+  mode: InspectorMode,
+  origins: Map<string, PackageOrigin>,
 ): Promise<void> {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     res.writeHead(405).end()
@@ -265,6 +423,8 @@ async function serveInstrumentedPlugin(
     if (originalPath.includes('client.js.map')) {
       body = Buffer.from(source)
       contentType = 'application/json'
+    } else if (mode.kind === 'npx') {
+      body = Buffer.from(instrumentPublishedBundle(source, modules, originalPath, mode.repository, origins))
     } else {
       const mapPath = /\/\/# sourceMappingURL=([^\s]+)/u.exec(source)?.[1]
       if (mapPath === undefined) body = Buffer.from(source)
@@ -428,6 +588,75 @@ export function injectInstrumentedShell(html: string, instrumentedIndex: string)
   return out.replaceAll('/plugins/', `${PLUGIN_PATH}/plugins/`)
 }
 
+/**
+ * npx mode: keep DSH's own shell, inline the Lovinsp overlay ahead of it, and
+ * route plugin bundles through the marking proxy.
+ * @param html - the authenticated DSH index page.
+ * @param overlayScript - the self-contained script `@lovinsp/core` generates.
+ */
+export function injectOverlay(html: string, overlayScript: string): string {
+  const tag = `<script>${overlayScript.replaceAll('</script', '<\\/script')}</script>`
+  const withOverlay = /<\/head>/iu.test(html) ? html.replace(/<\/head>/iu, `${tag}</head>`) : `${tag}${html}`
+  return withOverlay.replaceAll('/plugins/', `${PLUGIN_PATH}/plugins/`)
+}
+
+/**
+ * The git ref matching the running harness: `dsh-v<version>` of the
+ * `@deepseek-ai/dsh` package that launched this process, else `master`.
+ * @param entry - the launcher script; defaults to `process.argv[1]`.
+ */
+export function detectHarnessRef(entry: string | undefined = process.argv[1]): string {
+  // `npx` launches the `.bin/dsh` symlink; the package sits behind its real path.
+  let dir: string | undefined
+  if (entry !== undefined) {
+    try {
+      dir = dirname(realpathSync(entry))
+    } catch {
+      dir = dirname(resolve(entry))
+    }
+  }
+  while (dir !== undefined) {
+    const manifest = join(dir, 'package.json')
+    if (existsSync(manifest)) {
+      try {
+        const parsed = JSON.parse(readFileSync(manifest, 'utf8')) as { name?: string; version?: string }
+        if (parsed.name === '@deepseek-ai/dsh' && typeof parsed.version === 'string') return `dsh-v${parsed.version}`
+      } catch {
+        // Keep walking: a malformed manifest on the way says nothing about dsh.
+      }
+    }
+    const parent = dirname(dir)
+    dir = parent === dir ? undefined : parent
+  }
+  return 'master'
+}
+
+/** Build the inlined overlay for npx mode: copy path or open the file on GitHub, never a local editor. */
+async function overlayScript(config: Config, ref: string): Promise<string> {
+  const { getWebComponentCode } = await import('@lovinsp/core')
+  const repository = (config.repository ?? HARNESS_REPOSITORY).replace(/\/$/u, '')
+  const port = config.port ?? 5678
+  const script = getWebComponentCode({
+    bundler: 'vite',
+    port,
+    showSwitch: true,
+    hideConsole: false,
+    editor: config.editor,
+    behavior: {
+      locate: false,
+      copy: true,
+      target: `${repository}/blob/${ref}/{file}`,
+      defaultAction: 'target',
+      keys: { target: ['shiftKey', 'altKey', 'metaKey'] },
+    },
+  } as Parameters<typeof getWebComponentCode>[0], port)
+  // Lovinsp picks the locate chord per platform (⌘ on macOS, Ctrl elsewhere)
+  // but takes the target chord as one static list; give the GitHub jump the
+  // same per-platform chord so the documented shortcut holds in both modes.
+  const perPlatform = "(/mac|iphone|ipad|ipod/i.test(navigator.userAgent)) ? 'shiftKey,altKey,metaKey' : 'shiftKey,altKey,ctrlKey'"
+  return script.replace(/inspector\.targetKeys = '[^']*';/u, `inspector.targetKeys = ${perPlatform};`)
+}
+
 /** Mount the build watcher, instrumented asset route, and authenticated index transform. */
 export async function apply(ctx: Context, config: Config): Promise<void> {
   let readSection: (() => InspectorSettings) = () => ({ enabled: config.enabled ?? true })
@@ -443,38 +672,50 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
 
   if (config.enabled === false) return
   const sourceRoot = resolveSourceRoot(config.sourceRoot)
-  if (sourceRoot === undefined) {
-    throw new Error('frontend-inspector: sourceRoot must name a clean DeepSeek Harness checkout (or launch dsh from that checkout)')
-  }
   const cacheRoot = resolveCacheRoot()
   const distRoot = join(cacheRoot, 'dist')
 
-  await ctx.effect(async () => {
-    const builder = await startBuilder(config, sourceRoot, cacheRoot)
-    return async () => { await stopBuilder(builder) }
-  }, 'frontend-inspector: persistent Lovinsp shell build')
+  let mode: InspectorMode
+  let overlay = ''
+  if (sourceRoot === undefined) {
+    const ref = config.sourceRef ?? detectHarnessRef()
+    mode = { kind: 'npx', repository: (config.repository ?? HARNESS_REPOSITORY).replace(/\/$/u, '') }
+    overlay = await overlayScript(config, ref)
+    console.info(`frontend-inspector: no harness checkout found, marking published bundles; clicks open ${mode.repository}/blob/${ref}`)
+  } else {
+    mode = { kind: 'checkout' }
+    await ctx.effect(async () => {
+      const builder = await startBuilder(config, sourceRoot, cacheRoot)
+      return async () => { await stopBuilder(builder) }
+    }, 'frontend-inspector: persistent Lovinsp shell build')
+  }
 
   ctx.inject(['webServer', 'clientModules'], (httpCtx) => {
     httpCtx.effect(() => {
       const modules = httpCtx.get('clientModules') as ClientModulesReader
       const pluginCache = new Map<string, Buffer>()
-      const removeRoute = httpCtx.webServer.register({
-        kind: 'prefix',
-        path: SHELL_PATH,
-        handler: async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-          await serveInstrumentedAsset(req, res, distRoot)
-        },
-      })
+      const origins = new Map<string, PackageOrigin>()
+      const removeRoute = mode.kind === 'checkout'
+        ? httpCtx.webServer.register({
+          kind: 'prefix',
+          path: SHELL_PATH,
+          handler: async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+            await serveInstrumentedAsset(req, res, distRoot)
+          },
+        })
+        : () => {}
       const removePluginRoute = httpCtx.webServer.register({
         kind: 'prefix',
         path: PLUGIN_PATH,
         handler: async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-          await serveInstrumentedPlugin(req, res, httpCtx.webServer.port, modules, pluginCache)
+          await serveInstrumentedPlugin(req, res, httpCtx.webServer.port, modules, pluginCache, mode, origins)
         },
       })
       const removeTap = httpCtx.webServer.tapIndex((html) => {
         if (readSection().enabled !== true) return html
-        return injectInstrumentedShell(html, readFileSync(join(distRoot, 'index.html'), 'utf8'))
+        return mode.kind === 'checkout'
+          ? injectInstrumentedShell(html, readFileSync(join(distRoot, 'index.html'), 'utf8'))
+          : injectOverlay(html, overlay)
       })
       return () => {
         removeRoute()
