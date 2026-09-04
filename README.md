@@ -26,11 +26,11 @@ This plugin needs a DeepSeek Harness **source checkout** (it rebuilds the Web sh
 ```sh
 git clone --depth 1 --branch dsh-v0.1.2-rc.1 https://github.com/deepseek-ai/deepseek-harness.git
 cd deepseek-harness && pnpm install && pnpm run build
-pnpm dsh plugin --profile web add --allow-build=esbuild github:lovstudio/dsh-frontend-inspector#v0.1.2
+pnpm dsh plugin --profile web add github:lovstudio/dsh-frontend-inspector#v0.1.3
 pnpm dsh web
 ```
 
-`--allow-build=esbuild` is required on pnpm 10+, which otherwise refuses esbuild's install script and makes `dsh plugin` abort before registering the bundle.
+Vite is resolved from the checkout (`apps/web/node_modules/vite`) at runtime, so the plugin declares no bundler dependency and pnpm 10+ installs it without approving any build script.
 
 Install this repository as a bundle in the `web` profile:
 

@@ -1,10 +1,11 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { parse } from '@babel/parser'
 import { TraceMap, originalPositionFor } from '@jridgewell/trace-mapping'
 import MagicString from 'magic-string'
-import { build, loadConfigFromFile } from 'vite'
 import { lovinspPlugin } from 'lovinsp'
 
 const raw = process.argv[2]
@@ -15,6 +16,13 @@ const cacheRoot = resolve(options.cacheRoot)
 const appRoot = join(sourceRoot, 'apps', 'web')
 const configFile = join(appRoot, 'vite.config.ts')
 const outDir = join(cacheRoot, 'dist')
+
+// Vite comes from the harness checkout (apps/web depends on it), not from
+// this package: declaring it here would pull esbuild into the profile install,
+// where pnpm 10+ refuses its install script and `dsh plugin add` aborts.
+const { build, loadConfigFromFile } = await import(
+  pathToFileURL(createRequire(join(appRoot, 'package.json')).resolve('vite')).href
+)
 
 await mkdir(cacheRoot, { recursive: true })
 process.chdir(cacheRoot)
