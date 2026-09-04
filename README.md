@@ -26,7 +26,7 @@ This plugin needs a DeepSeek Harness **source checkout** (it rebuilds the Web sh
 ```sh
 git clone --depth 1 --branch dsh-v0.1.2-rc.1 https://github.com/deepseek-ai/deepseek-harness.git
 cd deepseek-harness && pnpm install && pnpm run build
-pnpm dsh plugin --profile web add github:lovstudio/dsh-frontend-inspector#v0.1.3
+pnpm dsh plugin --profile web add -w github:lovstudio/dsh-frontend-inspector#v0.1.3
 pnpm dsh web
 ```
 
@@ -35,7 +35,7 @@ Vite is resolved from the checkout (`apps/web/node_modules/vite`) at runtime, so
 Install this repository as a bundle in the `web` profile:
 
 ```sh
-dsh plugin --profile web add link:/absolute/path/to/dsh-frontend-inspector
+dsh plugin --profile web add -w link:/absolute/path/to/dsh-frontend-inspector
 ```
 
 The plugin discovers the DSH source checkout from `sourceRoot`, `DSH_SOURCE_ROOT`, or the launch working directory, in that order. Starting DSH from the checkout therefore needs no extra configuration:
