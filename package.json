@@ -1,11 +1,12 @@
 {
   "name": "@lovstudio/dsh-frontend-inspector",
-  "description": "Lovstudio dev click-to-source for DeepSeek Harness web: runtime-only, reads React _debugSource on Shift+Option click and opens the editor. No build-time markers; works in vite dev (jsxDEV __source).",
+  "description": "Production click-to-source for DeepSeek Harness Web, delivered as an external-cache Host plugin without modifying the DSH checkout.",
   "version": "0.1.1",
   "type": "module",
   "main": "index.js",
   "files": [
     "index.js",
+    "runtime-build-runner.mjs",
     "cordis.patch.yml"
   ],
   "license": "MIT",
@@ -29,13 +30,26 @@
       "patch": "./cordis.patch.yml"
     }
   },
+  "scripts": {
+    "build": "tsdown",
+    "test": "pnpm run build && node --test test/*.test.mjs",
+    "watch": "tsdown --watch",
+    "prepack": "pnpm run build"
+  },
   "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.1"
+    "@babel/parser": "^7.28.4",
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "@jridgewell/trace-mapping": "^0.3.30",
+    "lovinsp": "^1.8.0",
+    "magic-string": "^0.30.19",
+    "vite": "^6.0.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1"
+    "@deepseek-ai/cordis": "^4.0.1",
+    "tsdown": "^0.22.14",
+    "typescript": "^7.0.2"
   }
 }

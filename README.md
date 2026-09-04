@@ -1,46 +1,67 @@
 # dsh-frontend-inspector
 
-Lovstudio's **dev-only** click-to-source for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) web surface. Hold `Shift + Option` and click a rendered element to open the editor at that element's source location.
+Production click-to-source for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) Web surface. Hold the Lovinsp shortcut over a rendered element to locate or copy its original source position.
 
-This is a **Lovstudio** plugin, not a DeepSeek-AI package, distributed under the `@lovstudio` scope.
+This is a Lovstudio plugin under the `@lovstudio` scope. It does not patch or rebuild files inside the DeepSeek Harness repository.
 
-## What it does
+## Architecture
 
-The plugin is completely **runtime** — there are no build-time source transforms and no build-time `data-insp-path` markers.
+Current DSH Web links prebuilt package artifacts and serves runtime `dsh.client` bundles through the Client Module Registry. A runtime-only React `_debugSource` reader therefore cannot inspect the production UI.
 
-- **Host half** registers two `webServer` routes:
-  - `GET /lovinsp-inject.js` — serves the runtime client script.
-  - `POST /lovinsp-open` — receives `{ file, line, col }` and opens the editor (`open <scheme>://file/<file>:<line>:<col>`).
-- **Client** (the served script): on `Shift + Option` click, walks the target element's React fiber (`__reactFiber$`) to the nearest custom component and reads its `_debugSource` (`file:line:column`), then POSTs it to `/lovinsp-open`.
+This plugin uses the supported Host extension points instead:
 
-Because it reads React's `_debugSource`, it works where the app is built with the JSX `__source` kept in **development mode** (a real `vite`/dev-server React app). Production builds strip `__source`, so the plugin is a dev-facing debug tool.
+- A persistent Vite process reads the clean DSH checkout and writes a Lovinsp-enabled shell to `DSH_HOME/cache/frontend-inspector/dist`.
+- The shell build maps compiled JSX calls through adjacent source maps and emits `data-insp-path` values pointing to original `.tsx` files.
+- `webServer.tapIndex()` retains DSH authentication and boot-data injection while replacing only shell asset tags.
+- `/lovinsp-shell/*` serves the external shell cache as a named route ahead of the official static fallback.
+- `/lovinsp-plugins/*` proxies Client Module Registry combo bundles, applies their indexed source maps, and adds source markers for independent plugins such as Plugin Marketplace.
+- The Lovinsp bridge stays alive with the Vite watcher and is stopped with the DSH plugin lifecycle.
 
-The plugin reaches DSH capabilities through the injected Cordis `ctx` only (`webServer`, and the `settings` service for the enabled switch). Its only package dependency is the schemastery schema library.
+The DSH checkout is read-only input. Generated files, Vite cache, and Lovinsp state stay under `DSH_HOME/cache/frontend-inspector`.
 
 ## Install
 
-Plugins distribute as a **bundle** (`dsh.bundle.patch` → `cordis.patch.yml`). Install into the `web` profile (the one `dsh web` boots):
+Install this repository as a bundle in the `web` profile:
 
 ```sh
-# from git (append #<sha> to pin a commit)
-dsh plugin --profile web add github:lovstudio/dsh-frontend-inspector
-
-# or straight from npm
-dsh plugin --profile web add @lovstudio/dsh-frontend-inspector
+dsh plugin --profile web add link:/absolute/path/to/dsh-frontend-inspector
 ```
 
-`enabled` defaults to **true**; a `frontend-inspector.enabled` settings namespace can override it. The `webServer` service is provided by the harness launcher / `@deepseek-ai/dsh-base`.
+The plugin discovers the DSH source checkout from `sourceRoot`, `DSH_SOURCE_ROOT`, or the launch working directory, in that order. Starting DSH from the checkout therefore needs no extra configuration:
+
+```sh
+cd /absolute/path/to/deepseek-harness
+dsh web
+```
+
+To launch elsewhere, set `sourceRoot` in the bundle row or export `DSH_SOURCE_ROOT`.
+
+## Configuration
+
+| Field | Default | Meaning |
+|---|---:|---|
+| `enabled` | `true` | Build and serve the instrumented Web surface. |
+| `sourceRoot` | auto | Clean DeepSeek Harness checkout used as read-only source. |
+| `port` | `5678` | Start of Lovinsp's available-port search. |
+| `editor` | `vscode` | Editor identifier passed to Lovinsp. |
+| `startupTimeoutMs` | `120000` | First instrumented build deadline. |
+
+The `frontend-inspector.enabled` settings section can disable index routing without uninstalling the bundle.
 
 ## Use
 
-1. Start a **dev** web UI (one whose JSX keeps `__source`), or a `dsh web` served with `vite` dev-mode source info.
-2. Hold `Shift + Option` and click any element.
-3. The editor opens at the component's source.
+Lovinsp renders its switch on the page. The default action is IDE location; copy is also enabled. Source markers cover both the official shell and loader-delivered Client plugin bundles when their packages include source maps.
 
-## Notes
+## Local development
 
-- Dev-only: requires React `_debugSource` present in the running bundle.
-- IDE open uses the OS `open`/`xdg-open`/`start` command with the configured URL scheme (default `vscode`). Override via the plugin `scheme` config.
+Keep this checkout outside the DeepSeek Harness repository:
+
+```sh
+pnpm install
+pnpm run watch
+```
+
+The package watcher rebuilds the Host plugin. The plugin-owned Vite watcher rebuilds the external shell when DSH client artifacts change. Restart DSH after changing Host code or the runner.
 
 ## License
 
