@@ -1,7 +1,7 @@
 {
   "name": "@lovstudio/dsh-frontend-inspector",
-  "description": "Click-to-source for DeepSeek Harness Web: exact TypeScript positions and editor jumps from a source checkout, or file-level GitHub jumps on plain npx installs — an external Host plugin that never modifies the DSH checkout.",
-  "version": "0.1.4",
+  "description": "Click-to-source for DeepSeek Harness Web: exact TypeScript positions and editor jumps from a source checkout, or file-level GitHub jumps on plain npx installs \u2014 an external Host plugin that never modifies the DSH checkout.",
+  "version": "0.1.5",
   "type": "module",
   "main": "index.js",
   "files": [

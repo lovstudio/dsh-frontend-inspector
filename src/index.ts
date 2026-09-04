@@ -649,12 +649,41 @@ async function overlayScript(config: Config, ref: string): Promise<string> {
       defaultAction: 'target',
       keys: { target: ['shiftKey', 'altKey', 'metaKey'] },
     },
+    // ui-renderer wraps every slot in a zero-size `scoped-slots` element that
+    // sits on the composed path of everything; without a penalty Lovinsp
+    // reports it instead of the component the user actually pointed at.
+    sourcePriority: [{ match: 'ui-renderer/src/client/scoped-slots', priority: -1 }],
   } as Parameters<typeof getWebComponentCode>[0], port)
   // Lovinsp picks the locate chord per platform (⌘ on macOS, Ctrl elsewhere)
   // but takes the target chord as one static list; give the GitHub jump the
   // same per-platform chord so the documented shortcut holds in both modes.
   const perPlatform = "(/mac|iphone|ipad|ipod/i.test(navigator.userAgent)) ? 'shiftKey,altKey,metaKey' : 'shiftKey,altKey,ctrlKey'"
-  return script.replace(/inspector\.targetKeys = '[^']*';/u, `inspector.targetKeys = ${perPlatform};`)
+  return script.replace(/inspector\.targetKeys = '[^']*';/u, `inspector.targetKeys = ${perPlatform};`) + hintBadge(ref)
+}
+
+/**
+ * A dismissible corner badge naming the chord, since the overlay itself shows
+ * nothing until the keys are held — first-time users otherwise assume the
+ * plugin is inert.
+ */
+function hintBadge(ref: string): string {
+  const text = JSON.stringify(`源码定位 · 按住 ⇧⌥⌘ (Win: Shift+Alt+Ctrl) 点击元素 → GitHub ${ref}`)
+  return `
+;(function () {
+  if (typeof document === 'undefined') return
+  var key = 'frontend-inspector.hint-dismissed'
+  try { if (localStorage.getItem(key) === '1') return } catch (_e) {}
+  function mount() {
+    var badge = document.createElement('div')
+    badge.textContent = ${text}
+    badge.title = '点击隐藏这条提示'
+    badge.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:2147483646;font:12px/1.4 -apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",sans-serif;color:#181818;background:#F0EEE6;border:1px solid #E8E6DC;border-radius:8px;padding:6px 10px;box-shadow:0 1px 2px rgba(0,0,0,.06);cursor:pointer;user-select:none'
+    badge.addEventListener('click', function () { try { localStorage.setItem(key, '1') } catch (_e) {} badge.remove() })
+    document.body.appendChild(badge)
+  }
+  if (document.body) mount(); else document.addEventListener('DOMContentLoaded', mount)
+})();
+`
 }
 
 /** Mount the build watcher, instrumented asset route, and authenticated index transform. */

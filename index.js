@@ -551,8 +551,35 @@ async function overlayScript(config, ref) {
 				"altKey",
 				"metaKey"
 			] }
-		}
-	}, port).replace(/inspector\.targetKeys = '[^']*';/u, `inspector.targetKeys = (/mac|iphone|ipad|ipod/i.test(navigator.userAgent)) ? 'shiftKey,altKey,metaKey' : 'shiftKey,altKey,ctrlKey';`);
+		},
+		sourcePriority: [{
+			match: "ui-renderer/src/client/scoped-slots",
+			priority: -1
+		}]
+	}, port).replace(/inspector\.targetKeys = '[^']*';/u, `inspector.targetKeys = (/mac|iphone|ipad|ipod/i.test(navigator.userAgent)) ? 'shiftKey,altKey,metaKey' : 'shiftKey,altKey,ctrlKey';`) + hintBadge(ref);
+}
+/**
+* A dismissible corner badge naming the chord, since the overlay itself shows
+* nothing until the keys are held — first-time users otherwise assume the
+* plugin is inert.
+*/
+function hintBadge(ref) {
+	return `
+;(function () {
+  if (typeof document === 'undefined') return
+  var key = 'frontend-inspector.hint-dismissed'
+  try { if (localStorage.getItem(key) === '1') return } catch (_e) {}
+  function mount() {
+    var badge = document.createElement('div')
+    badge.textContent = ${JSON.stringify(`源码定位 · 按住 ⇧⌥⌘ (Win: Shift+Alt+Ctrl) 点击元素 → GitHub ${ref}`)}
+    badge.title = '点击隐藏这条提示'
+    badge.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:2147483646;font:12px/1.4 -apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",sans-serif;color:#181818;background:#F0EEE6;border:1px solid #E8E6DC;border-radius:8px;padding:6px 10px;box-shadow:0 1px 2px rgba(0,0,0,.06);cursor:pointer;user-select:none'
+    badge.addEventListener('click', function () { try { localStorage.setItem(key, '1') } catch (_e) {} badge.remove() })
+    document.body.appendChild(badge)
+  }
+  if (document.body) mount(); else document.addEventListener('DOMContentLoaded', mount)
+})();
+`;
 }
 /** Mount the build watcher, instrumented asset route, and authenticated index transform. */
 async function apply(ctx, config) {
