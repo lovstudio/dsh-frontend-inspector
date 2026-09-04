@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import {
-  HARNESS_REPOSITORY, detectHarnessRef, injectOverlay, instrumentPublishedBundle, repositoryPathFor,
+  HARNESS_REPOSITORY, detectHarnessRef, injectOverlay, instrumentPublishedBundle, overlayScript, repositoryPathFor,
 } from '../index.js'
 
 test('repositoryPathFor maps tsc output and cross-package regions onto repository paths', () => {
@@ -56,6 +56,17 @@ test('injectOverlay inlines the overlay before </head> and routes plugin bundles
   const out = injectOverlay(html, 'console.log("</script>")')
   assert.match(out, /<script>console\.log\("<\\\/script>"\)<\/script><\/head>/u)
   assert.match(out, /src="\/lovinsp-plugins\/plugins\/\?\?a\/client\.js"/u)
+})
+
+test('overlayScript keeps copy on the bare chord and reserves the meta key for GitHub', async () => {
+  const out = await overlayScript({}, 'dsh-v0.1.2-rc.1')
+  assert.match(out, /inspector\.copyKeys = 'shiftKey,altKey';/u)
+  assert.match(out, /inspector\.targetKeys = \(\/mac\|iphone\|ipad\|ipod\/i\.test\(navigator\.userAgent\)\) \? 'shiftKey,altKey,metaKey' : 'shiftKey,altKey,ctrlKey';/u)
+  assert.match(out, /inspector\.defaultAction = "copy";/u)
+  assert.match(out, new RegExp(`inspector\\.target = '${HARNESS_REPOSITORY}/blob/dsh-v0\\.1\\.2-rc\\.1/\\{file\\}';`, 'u'))
+  // The hint must never intercept a click meant for the app underneath.
+  assert.match(out, /pointer-events:none/u)
+  assert.doesNotMatch(out, /addEventListener\('click'/u)
 })
 
 test('detectHarnessRef reads the launching dsh package version and falls back to master', () => {

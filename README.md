@@ -31,14 +31,14 @@ Two modes, chosen automatically at startup:
 | Shell | rebuilt once by Vite with markers on the shell's own elements | untouched; only plugin bundles (where nearly all UI lives) carry markers |
 | Requirements | a harness checkout; Vite is resolved from its `apps/web` | nothing beyond the plugin |
 
-Shortcut in both modes: hold **Shift+Option+Command** (Windows: Shift+Alt+Ctrl) while moving the mouse to highlight an element, then click; **Shift+Alt** + click copies the path instead. npx mode also shows a dismissible corner hint naming the chord, since the overlay is invisible until the keys are held.
+Shortcut in both modes: hold **Shift+Option** (Windows: Shift+Alt) while moving the mouse to highlight an element, then click — a source checkout opens your editor, npx mode copies the path. In npx mode, adding **Command** (Windows: Ctrl) opens the file on GitHub instead. npx mode also shows the chord once as a transient hint on first load, since the overlay is invisible until the keys are held.
 
 **From a source checkout (exact positions, editor jump):**
 
 ```sh
 git clone --depth 1 --branch dsh-v0.1.2-rc.1 https://github.com/deepseek-ai/deepseek-harness.git
 cd deepseek-harness && pnpm install && pnpm run build
-pnpm dsh plugin --profile web add -w github:lovstudio/dsh-frontend-inspector#v0.1.5
+pnpm dsh plugin --profile web add -w github:lovstudio/dsh-frontend-inspector#v0.1.6
 pnpm dsh web
 ```
 
@@ -47,7 +47,7 @@ The checkout is found from `sourceRoot`, `DSH_SOURCE_ROOT`, or the launch direct
 **Without a checkout (file-level, GitHub jump):**
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add -w github:lovstudio/dsh-frontend-inspector#v0.1.5
+npx @deepseek-ai/dsh plugin --profile web add -w github:lovstudio/dsh-frontend-inspector#v0.1.6
 npx @deepseek-ai/dsh web
 ```
 
@@ -69,7 +69,7 @@ The `frontend-inspector.enabled` settings section can disable index routing with
 
 ## Use
 
-Lovinsp renders its switch on the page. In checkout mode the default action is IDE location and markers cover both the official shell and plugin bundles (from their source maps). In npx mode the default action opens the file on GitHub and markers cover plugin bundles only, resolved from the `//#region` file markers tsdown leaves in published `lib/client.js` (own files map `lib/types/**/x.js` back to `src/**/x.tsx`). Copy is enabled in both modes.
+Lovinsp renders its switch on the page. In checkout mode the default action is IDE location and markers cover both the official shell and plugin bundles (from their source maps). In npx mode the default action copies the path, Command promotes it to a GitHub jump, and markers cover plugin bundles only, resolved from the `//#region` file markers tsdown leaves in published `lib/client.js` (own files map `lib/types/**/x.js` back to `src/**/x.tsx`). Copy is enabled in both modes.
 
 ## Local development
 

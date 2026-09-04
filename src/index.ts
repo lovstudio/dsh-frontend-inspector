@@ -632,7 +632,7 @@ export function detectHarnessRef(entry: string | undefined = process.argv[1]): s
 }
 
 /** Build the inlined overlay for npx mode: copy path or open the file on GitHub, never a local editor. */
-async function overlayScript(config: Config, ref: string): Promise<string> {
+export async function overlayScript(config: Config, ref: string): Promise<string> {
   const { getWebComponentCode } = await import('@lovinsp/core')
   const repository = (config.repository ?? HARNESS_REPOSITORY).replace(/\/$/u, '')
   const port = config.port ?? 5678
@@ -646,8 +646,11 @@ async function overlayScript(config: Config, ref: string): Promise<string> {
       locate: false,
       copy: true,
       target: `${repository}/blob/${ref}/{file}`,
-      defaultAction: 'target',
-      keys: { target: ['shiftKey', 'altKey', 'metaKey'] },
+      defaultAction: 'copy',
+      // Lovinsp ignores `hotKeys` outright once any per-action chord is set, and
+      // matches each chord on the exact modifier set. Both actions must be
+      // listed or the unlisted one becomes unreachable.
+      keys: { copy: ['shiftKey', 'altKey'], target: ['shiftKey', 'altKey', 'metaKey'] },
     },
     // ui-renderer wraps every slot in a zero-size `scoped-slots` element that
     // sits on the composed path of everything; without a penalty Lovinsp
@@ -662,24 +665,30 @@ async function overlayScript(config: Config, ref: string): Promise<string> {
 }
 
 /**
- * A dismissible corner badge naming the chord, since the overlay itself shows
+ * A one-off transient hint naming the chords, since the overlay itself shows
  * nothing until the keys are held — first-time users otherwise assume the
- * plugin is inert.
+ * plugin is inert. Non-interactive and self-retiring so it can never swallow a
+ * click or sit on top of the app chrome.
  */
 function hintBadge(ref: string): string {
-  const text = JSON.stringify(`源码定位 · 按住 ⇧⌥⌘ (Win: Shift+Alt+Ctrl) 点击元素 → GitHub ${ref}`)
+  const mac = JSON.stringify(`源码定位 · 按住 ⇧⌥ 点击复制路径，再加 ⌘ 打开 GitHub ${ref}`)
+  const other = JSON.stringify(`源码定位 · 按住 Shift+Alt 点击复制路径，再加 Ctrl 打开 GitHub ${ref}`)
   return `
 ;(function () {
   if (typeof document === 'undefined') return
-  var key = 'frontend-inspector.hint-dismissed'
+  var key = 'frontend-inspector.hint-shown'
   try { if (localStorage.getItem(key) === '1') return } catch (_e) {}
   function mount() {
+    try { localStorage.setItem(key, '1') } catch (_e) {}
     var badge = document.createElement('div')
-    badge.textContent = ${text}
-    badge.title = '点击隐藏这条提示'
-    badge.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:2147483646;font:12px/1.4 -apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",sans-serif;color:#181818;background:#F0EEE6;border:1px solid #E8E6DC;border-radius:8px;padding:6px 10px;box-shadow:0 1px 2px rgba(0,0,0,.06);cursor:pointer;user-select:none'
-    badge.addEventListener('click', function () { try { localStorage.setItem(key, '1') } catch (_e) {} badge.remove() })
+    badge.textContent = /mac|iphone|ipad|ipod/i.test(navigator.userAgent) ? ${mac} : ${other}
+    badge.style.cssText = 'position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:2147483646;font:12px/1.4 -apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",sans-serif;color:#181818;background:#F0EEE6;border:1px solid #E8E6DC;border-radius:8px;padding:6px 10px;box-shadow:0 1px 2px rgba(0,0,0,.06);pointer-events:none;user-select:none;opacity:0;transition:opacity .25s ease'
     document.body.appendChild(badge)
+    requestAnimationFrame(function () { badge.style.opacity = '1' })
+    setTimeout(function () {
+      badge.style.opacity = '0'
+      setTimeout(function () { badge.remove() }, 300)
+    }, 6000)
   }
   if (document.body) mount(); else document.addEventListener('DOMContentLoaded', mount)
 })();
