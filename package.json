@@ -1,7 +1,7 @@
 {
   "name": "@lovstudio/dsh-frontend-inspector",
   "description": "Production click-to-source for DeepSeek Harness Web, delivered as an external-cache Host plugin without modifying the DSH checkout.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "main": "index.js",
   "files": [
