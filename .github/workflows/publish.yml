@@ -19,9 +19,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # This is a pnpm project (pnpm-workspace.yaml + pnpm-lock.yaml) and
+      # `prepack` shells out to pnpm, which `npm publish` runs: without pnpm on
+      # PATH the publish exits 127. `npm install` also crashes here with
+      # "Cannot read properties of null (reading 'edgesOut')".
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
       - uses: actions/setup-node@v4
         with:
-          node-version: 22.x
+          node-version: 24
           registry-url: https://registry.npmjs.org
-      - run: npm install
+      - run: pnpm install --frozen-lockfile
       - run: npm publish --provenance --access public
