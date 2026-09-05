@@ -44,9 +44,18 @@ function jsxCalleeName(callee) {
   return undefined
 }
 
+function calleeObjectName(callee) {
+  if (callee?.type !== 'MemberExpression') return undefined
+  if (callee.object?.type === 'Identifier') return callee.object.name
+  if (callee.object?.type === 'MemberExpression') return calleeObjectName(callee.object)
+  return undefined
+}
+
 function isJsxCallee(callee) {
   const name = jsxCalleeName(callee)
-  return name !== undefined && /^_?jsx(?:s|DEV)?(?:\$\d+)?$/.test(name)
+  if (name === undefined) return false
+  if (/^_?jsx(?:s|DEV)?(?:\$\d+)?$/.test(name)) return true
+  return /^_?createElement(?:\$\d+)?$/.test(name) && calleeObjectName(callee) !== 'document'
 }
 
 function domTag(node) {

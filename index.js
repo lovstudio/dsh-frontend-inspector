@@ -45,7 +45,8 @@ const Config = z.object({
 	editor: z.string().default("vscode"),
 	startupTimeoutMs: z.natural().default(12e4),
 	repository: z.string().default(HARNESS_REPOSITORY),
-	sourceRef: z.string()
+	sourceRef: z.string(),
+	refs: z.dict(z.string()).default({})
 });
 /** Schema of the frontend-inspector settings section. */
 const INSPECTOR_SETTINGS_SCHEMA = z.object({ enabled: z.boolean().default(true) });
@@ -77,9 +78,18 @@ function jsxCalleeName(callee) {
 	if (property?.type === "Identifier" && typeof property.name === "string") return property.name;
 	if (callee.computed === true && property?.type === "StringLiteral" && typeof property.value === "string") return property.value;
 }
+/** The receiver of `x.y.createElement(...)`, which tells React apart from the DOM. */
+function calleeObjectName(callee) {
+	if (callee.type !== "MemberExpression") return void 0;
+	const object = callee.object;
+	if (object?.type === "Identifier" && typeof object.name === "string") return object.name;
+	if (object?.type === "MemberExpression") return calleeObjectName(object);
+}
 function isJsxCallee(callee) {
 	const name = jsxCalleeName(callee);
-	return name !== void 0 && /^_?jsx(?:s|DEV)?(?:\$\d+)?$/u.test(name);
+	if (name === void 0) return false;
+	if (/^_?jsx(?:s|DEV)?(?:\$\d+)?$/u.test(name)) return true;
+	return /^_?createElement(?:\$\d+)?$/u.test(name) && calleeObjectName(callee) !== "document";
 }
 function domTag(node) {
 	if (node?.type === "StringLiteral" && typeof node.value === "string") return node.value;
@@ -150,6 +160,20 @@ function sectionIdAtLine(sourceMap, line, ids) {
 	}
 	return selected === void 0 ? void 0 : ids[selected];
 }
+/**
+* Normalize any `repository` spelling npm accepts — `git+https://…​.git`,
+* `git@host:owner/repo`, `github:owner/repo`, bare `owner/repo` — to the plain
+* `https://host/owner/repo` a browser can open.
+* @param url - the manifest's `repository` string or `repository.url`.
+*/
+function normalizeRepository(url) {
+	if (url === void 0 || url === "") return void 0;
+	const shorthand = /^(?:github:)?([\w.-]+)\/([\w.-]+)$/u.exec(url);
+	const plain = shorthand === null ? url.replace(/^git\+/u, "").replace(/\.git$/u, "").replace(/\/$/u, "") : `https://github.com/${shorthand[1]}/${shorthand[2]}`;
+	const ssh = /^(?:ssh:\/\/)?git@([^:/]+)[:/](.+)$/u.exec(plain);
+	const https = ssh === null ? plain : `https://${ssh[1]}/${ssh[2]}`;
+	return /^https:\/\/[^/]+\/[^/]+\/[^/]+/u.test(https) ? https : void 0;
+}
 /** Read `repository.url` / `repository.directory` of the package serving `id`. */
 function packageOrigin(modules, id, cache) {
 	const cached = cache.get(id);
@@ -158,8 +182,11 @@ function packageOrigin(modules, id, cache) {
 	const clientPath = modules.clientPath(id);
 	if (clientPath !== void 0) try {
 		const manifest = JSON.parse(readFileSync(join(clientPath, "..", "..", "package.json"), "utf8"));
+		const repository = typeof manifest.repository === "string" ? manifest.repository : manifest.repository?.url;
 		origin = {
-			repository: (typeof manifest.repository === "string" ? manifest.repository : manifest.repository?.url)?.replace(/^git\+/u, "").replace(/\.git$/u, ""),
+			name: manifest.name,
+			version: manifest.version,
+			repository: normalizeRepository(repository),
 			directory: typeof manifest.repository === "object" ? manifest.repository?.directory : void 0
 		};
 	} catch {}
@@ -202,15 +229,28 @@ function anchorAt(anchors, line) {
 * so they go back to `src/…/x.tsx` — the marker sits on a JSX call, hence the
 * extension; cross-package files appear relative to the package directory.
 * @param region - the marker text after `//#region `.
-* @param directory - `repository.directory` of the package.
+* @param directory - `repository.directory` of the package; a package published
+* from its own repository has none, so its files sit at the repository root.
 * @returns the repository-relative file, or undefined for CSS modules and escapes.
 */
-function repositoryPathFor(region, directory) {
+function repositoryPathFor(region, directory = "") {
 	if (region.startsWith("\0") || region.includes("\\0")) return void 0;
 	const own = /^(?:\.\/)?lib\/types\/(.+)\.js$/u.exec(region);
 	const relative = own === null ? region : `src/${own[1]}.tsx`;
 	const path = posix.normalize(posix.join(directory, relative));
 	return path.startsWith("..") || path.startsWith("/") ? void 0 : path;
+}
+/**
+* The git ref one package's markers point at: the harness keeps its own
+* `dsh-v…` tag, every other package follows the `v<version>` tag that npm
+* release workflows push next to the published version, and `refs` overrides
+* both. Undefined means the package cannot be linked and stays unmarked.
+*/
+function refFor(origin, options) {
+	const override = origin.name === void 0 ? void 0 : options.refs?.[origin.name];
+	if (override !== void 0) return override;
+	if (origin.repository !== void 0 && origin.repository === options.harnessRepository) return options.harnessRef;
+	return origin.version === void 0 ? void 0 : `v${origin.version}`;
 }
 /** Parse one combo script; undefined when Babel cannot recover a tree. */
 function parseBundle(code) {
@@ -272,27 +312,34 @@ function instrumentClientBundle(code, sourceMap, modules, sourcePath) {
 }
 /**
 * Add Lovinsp DOM markers to one loader combo script from its `//#region`
-* markers (npx mode): the file is exact, the line is the compiled one.
-* Only packages published from `repository` get markers; a click on anything
-* else would open the wrong repository.
+* markers (npx mode): the file is exact, the compiled line is not, so the
+* marker carries a whole `…/blob/<ref>/<file>` URL and no line.
+*
+* Every package that declares a `repository` and an installed version is
+* marked, each pointing at its own release — the combo script mixes harness
+* packages with third-party plugins, and a single repository would send most
+* clicks to the wrong project.
 */
-function instrumentPublishedBundle(code, modules, sourcePath, repository, origins = /* @__PURE__ */ new Map()) {
+function instrumentPublishedBundle(code, modules, sourcePath, options = {}) {
 	const ast = parseBundle(code);
 	if (ast === void 0) return code;
 	const ids = comboIds(sourcePath);
 	const sections = scanCode(code, /__ModuleLoader__\.load\(\{\s*id:\s*"([^"]+)"/gu);
 	const regions = scanCode(code, /^[ \t]*\/\/#region (.+?)[ \t]*$/gmu);
+	const origins = options.origins ?? /* @__PURE__ */ new Map();
 	const output = new MagicString(code);
 	eachDomJsxCall(ast, ({ tag, propsStart, line, column }) => {
 		const sectionId = anchorAt(sections, line) ?? (ids.length === 1 ? ids[0] : void 0);
 		if (sectionId === void 0) return;
 		const origin = packageOrigin(modules, sectionId, origins);
-		if (origin.repository !== repository || origin.directory === void 0) return;
+		if (origin.repository === void 0) return;
+		const ref = refFor(origin, options);
+		if (ref === void 0) return;
 		const region = anchorAt(regions, line);
 		if (region === void 0) return;
 		const file = repositoryPathFor(region, origin.directory);
 		if (file === void 0) return;
-		const marker = `${file}:${String(line)}:${String(column + 1)}:${tag}`;
+		const marker = `${origin.repository}/blob/${ref}/${file}:${String(line)}:${String(column + 1)}:${tag}`;
 		output.appendLeft(propsStart + 1, `${MARKER_ATTRIBUTE}:${JSON.stringify(marker)},`);
 	});
 	return output.toString();
@@ -301,7 +348,7 @@ async function fetchLocalAsset(port, path) {
 	return fetch(`http://127.0.0.1:${String(port)}${path}`);
 }
 /** Proxy and instrument one client-module combo response. */
-async function serveInstrumentedPlugin(req, res, port, modules, cache, mode, origins) {
+async function serveInstrumentedPlugin(req, res, port, modules, cache, mode) {
 	if (req.method !== "GET" && req.method !== "HEAD") {
 		res.writeHead(405).end();
 		return;
@@ -325,7 +372,7 @@ async function serveInstrumentedPlugin(req, res, port, modules, cache, mode, ori
 		if (originalPath.includes("client.js.map")) {
 			body = Buffer.from(source);
 			contentType = "application/json";
-		} else if (mode.kind === "npx") body = Buffer.from(instrumentPublishedBundle(source, modules, originalPath, mode.repository, origins));
+		} else if (mode.kind === "npx") body = Buffer.from(instrumentPublishedBundle(source, modules, originalPath, mode.marks));
 		else {
 			const mapPath = /\/\/# sourceMappingURL=([^\s]+)/u.exec(source)?.[1];
 			if (mapPath === void 0) body = Buffer.from(source);
@@ -530,10 +577,15 @@ function detectHarnessRef(entry = process.argv[1]) {
 	}
 	return "master";
 }
-/** Build the inlined overlay for npx mode: copy path or open the file on GitHub, never a local editor. */
-async function overlayScript(config, ref) {
+/**
+* Build the inlined overlay for npx mode: copy the source URL or open it on
+* GitHub, never a local editor. Each marker already holds the full
+* `…/blob/<ref>/<file>` URL of its own package, so both actions are `{file}`
+* — the compiled line would point at the wrong place in the source file and
+* is deliberately left out.
+*/
+async function overlayScript(config) {
 	const { getWebComponentCode } = await import("@lovinsp/core");
-	const repository = (config.repository ?? "https://github.com/deepseek-ai/deepseek-harness").replace(/\/$/u, "");
 	const port = config.port ?? 5678;
 	return getWebComponentCode({
 		bundler: "vite",
@@ -543,8 +595,8 @@ async function overlayScript(config, ref) {
 		editor: config.editor,
 		behavior: {
 			locate: false,
-			copy: true,
-			target: `${repository}/blob/${ref}/{file}`,
+			copy: "{file}",
+			target: "{file}",
 			defaultAction: "copy",
 			keys: {
 				copy: ["shiftKey", "altKey"],
@@ -559,7 +611,7 @@ async function overlayScript(config, ref) {
 			match: "ui-renderer/src/client/scoped-slots",
 			priority: -1
 		}]
-	}, port).replace(/inspector\.targetKeys = '[^']*';/u, `inspector.targetKeys = (/mac|iphone|ipad|ipod/i.test(navigator.userAgent)) ? 'shiftKey,altKey,metaKey' : 'shiftKey,altKey,ctrlKey';`) + hintBadge(ref);
+	}, port).replace(/inspector\.targetKeys = '[^']*';/u, `inspector.targetKeys = (/mac|iphone|ipad|ipod/i.test(navigator.userAgent)) ? 'shiftKey,altKey,metaKey' : 'shiftKey,altKey,ctrlKey';`) + hintBadge();
 }
 /**
 * A one-off transient hint naming the chords, since the overlay itself shows
@@ -567,7 +619,7 @@ async function overlayScript(config, ref) {
 * plugin is inert. Non-interactive and self-retiring so it can never swallow a
 * click or sit on top of the app chrome.
 */
-function hintBadge(ref) {
+function hintBadge() {
 	return `
 ;(function () {
   if (typeof document === 'undefined') return
@@ -576,7 +628,7 @@ function hintBadge(ref) {
   function mount() {
     try { localStorage.setItem(key, '1') } catch (_e) {}
     var badge = document.createElement('div')
-    badge.textContent = /mac|iphone|ipad|ipod/i.test(navigator.userAgent) ? ${JSON.stringify(`源码定位 · 按住 ⇧⌥ 点击复制路径，再加 ⌘ 打开 GitHub ${ref}`)} : ${JSON.stringify(`源码定位 · 按住 Shift+Alt 点击复制路径，再加 Ctrl 打开 GitHub ${ref}`)}
+    badge.textContent = /mac|iphone|ipad|ipod/i.test(navigator.userAgent) ? ${JSON.stringify("源码定位 · 按住 ⇧⌥ 点击复制源码链接，再加 ⌘ 在 GitHub 打开")} : ${JSON.stringify("源码定位 · 按住 Shift+Alt 点击复制源码链接，再加 Ctrl 在 GitHub 打开")}
     badge.style.cssText = 'position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:2147483646;font:12px/1.4 -apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",sans-serif;color:#181818;background:#F0EEE6;border:1px solid #E8E6DC;border-radius:8px;padding:6px 10px;box-shadow:0 1px 2px rgba(0,0,0,.06);pointer-events:none;user-select:none;opacity:0;transition:opacity .25s ease'
     document.body.appendChild(badge)
     requestAnimationFrame(function () { badge.style.opacity = '1' })
@@ -604,13 +656,19 @@ async function apply(ctx, config) {
 	let mode;
 	let overlay = "";
 	if (sourceRoot === void 0) {
-		const ref = config.sourceRef ?? detectHarnessRef();
+		const harnessRepository = (config.repository ?? "https://github.com/deepseek-ai/deepseek-harness").replace(/\/$/u, "");
+		const harnessRef = config.sourceRef ?? detectHarnessRef();
 		mode = {
 			kind: "npx",
-			repository: (config.repository ?? "https://github.com/deepseek-ai/deepseek-harness").replace(/\/$/u, "")
+			marks: {
+				harnessRepository,
+				harnessRef,
+				refs: config.refs,
+				origins: /* @__PURE__ */ new Map()
+			}
 		};
-		overlay = await overlayScript(config, ref);
-		console.info(`frontend-inspector: no harness checkout found, marking published bundles; clicks open ${mode.repository}/blob/${ref}`);
+		overlay = await overlayScript(config);
+		console.info(`frontend-inspector: no harness checkout found, marking published bundles; every plugin links to its own repository, the harness to ${harnessRepository}/blob/${harnessRef}`);
 	} else {
 		mode = { kind: "checkout" };
 		await ctx.effect(async () => {
@@ -624,7 +682,6 @@ async function apply(ctx, config) {
 		httpCtx.effect(() => {
 			const modules = httpCtx.get("clientModules");
 			const pluginCache = /* @__PURE__ */ new Map();
-			const origins = /* @__PURE__ */ new Map();
 			const removeRoute = mode.kind === "checkout" ? httpCtx.webServer.register({
 				kind: "prefix",
 				path: SHELL_PATH,
@@ -636,7 +693,7 @@ async function apply(ctx, config) {
 				kind: "prefix",
 				path: PLUGIN_PATH,
 				handler: async (req, res) => {
-					await serveInstrumentedPlugin(req, res, httpCtx.webServer.port, modules, pluginCache, mode, origins);
+					await serveInstrumentedPlugin(req, res, httpCtx.webServer.port, modules, pluginCache, mode);
 				}
 			});
 			const removeTap = httpCtx.webServer.tapIndex((html) => {
@@ -652,4 +709,4 @@ async function apply(ctx, config) {
 	});
 }
 //#endregion
-export { Config, HARNESS_REPOSITORY, INSPECTOR_SETTINGS_NAMESPACE, INSPECTOR_SETTINGS_SCHEMA, PLUGIN_PATH, SHELL_PATH, apply, detectHarnessRef, injectInstrumentedShell, injectOverlay, instrumentPublishedBundle, name, overlayScript, repositoryPathFor };
+export { Config, HARNESS_REPOSITORY, INSPECTOR_SETTINGS_NAMESPACE, INSPECTOR_SETTINGS_SCHEMA, PLUGIN_PATH, SHELL_PATH, apply, detectHarnessRef, injectInstrumentedShell, injectOverlay, instrumentPublishedBundle, name, normalizeRepository, overlayScript, repositoryPathFor };

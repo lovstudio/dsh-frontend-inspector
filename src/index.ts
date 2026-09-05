@@ -65,6 +65,12 @@ export interface Config {
   repository?: string
   /** npx mode: git ref of that repository; omitted derives `dsh-v<installed version>`. */
   sourceRef?: string
+  /**
+   * npx mode: git ref overrides for other packages, keyed by package name.
+   * Unlisted packages derive `v<installed version>`, the tag npm release
+   * workflows publish alongside the version.
+   */
+  refs?: Record<string, string>
 }
 
 /** Where the published harness packages come from; `repository.url` in their manifests. */
@@ -78,6 +84,7 @@ export const Config: z<Config> = z.object({
   startupTimeoutMs: z.natural().default(120_000),
   repository: z.string().default(HARNESS_REPOSITORY),
   sourceRef: z.string(),
+  refs: z.dict(z.string()).default({}),
 })
 
 /** Schema of the frontend-inspector settings section. */
@@ -127,9 +134,24 @@ function jsxCalleeName(callee: Record<string, unknown>): string | undefined {
   return undefined
 }
 
+/** The receiver of `x.y.createElement(...)`, which tells React apart from the DOM. */
+function calleeObjectName(callee: Record<string, unknown>): string | undefined {
+  if (callee.type !== 'MemberExpression') return undefined
+  const object = callee.object as Record<string, unknown> | undefined
+  if (object?.type === 'Identifier' && typeof object.name === 'string') return object.name
+  if (object?.type === 'MemberExpression') return calleeObjectName(object)
+  return undefined
+}
+
 function isJsxCallee(callee: Record<string, unknown>): boolean {
   const name = jsxCalleeName(callee)
-  return name !== undefined && /^_?jsx(?:s|DEV)?(?:\$\d+)?$/u.test(name)
+  if (name === undefined) return false
+  if (/^_?jsx(?:s|DEV)?(?:\$\d+)?$/u.test(name)) return true
+  // The classic runtime a plugin gets from `React.createElement`; several
+  // published plugins compile to it and would otherwise stay unmarked.
+  // `document.createElement` takes an options bag rather than props, so it is
+  // excluded by receiver instead of by shape.
+  return /^_?createElement(?:\$\d+)?$/u.test(name) && calleeObjectName(callee) !== 'document'
 }
 
 function domTag(node: Record<string, unknown> | undefined): string | undefined {
@@ -210,12 +232,31 @@ function sectionIdAtLine(sourceMap: unknown, line: number, ids: readonly string[
 /** How markers are resolved: exact positions from a checkout's maps, or repository paths from published bundles. */
 export type InspectorMode =
   | { readonly kind: 'checkout' }
-  | { readonly kind: 'npx'; readonly repository: string }
+  | { readonly kind: 'npx'; readonly marks: PublishedMarkOptions }
 
-/** `repository` fields of one published package manifest, normalized to a plain https URL. */
+/** Identity of one published package: where its sources live and which release is installed. */
 interface PackageOrigin {
+  readonly name?: string
+  readonly version?: string
   readonly repository?: string
   readonly directory?: string
+}
+
+/**
+ * Normalize any `repository` spelling npm accepts — `git+https://…​.git`,
+ * `git@host:owner/repo`, `github:owner/repo`, bare `owner/repo` — to the plain
+ * `https://host/owner/repo` a browser can open.
+ * @param url - the manifest's `repository` string or `repository.url`.
+ */
+export function normalizeRepository(url: string | undefined): string | undefined {
+  if (url === undefined || url === '') return undefined
+  const shorthand = /^(?:github:)?([\w.-]+)\/([\w.-]+)$/u.exec(url)
+  const plain = shorthand === null
+    ? url.replace(/^git\+/u, '').replace(/\.git$/u, '').replace(/\/$/u, '')
+    : `https://github.com/${shorthand[1]}/${shorthand[2]}`
+  const ssh = /^(?:ssh:\/\/)?git@([^:/]+)[:/](.+)$/u.exec(plain)
+  const https = ssh === null ? plain : `https://${ssh[1]}/${ssh[2]}`
+  return /^https:\/\/[^/]+\/[^/]+\/[^/]+/u.test(https) ? https : undefined
 }
 
 /** Read `repository.url` / `repository.directory` of the package serving `id`. */
@@ -227,11 +268,15 @@ function packageOrigin(modules: ClientModulesReader, id: string, cache: Map<stri
   if (clientPath !== undefined) {
     try {
       const manifest = JSON.parse(readFileSync(join(clientPath, '..', '..', 'package.json'), 'utf8')) as {
+        name?: string
+        version?: string
         repository?: string | { url?: string; directory?: string }
       }
       const repository = typeof manifest.repository === 'string' ? manifest.repository : manifest.repository?.url
       origin = {
-        repository: repository?.replace(/^git\+/u, '').replace(/\.git$/u, ''),
+        name: manifest.name,
+        version: manifest.version,
+        repository: normalizeRepository(repository),
         directory: typeof manifest.repository === 'object' ? manifest.repository?.directory : undefined,
       }
     } catch {
@@ -283,15 +328,41 @@ function anchorAt(anchors: readonly LineAnchor[], line: number): string | undefi
  * so they go back to `src/…/x.tsx` — the marker sits on a JSX call, hence the
  * extension; cross-package files appear relative to the package directory.
  * @param region - the marker text after `//#region `.
- * @param directory - `repository.directory` of the package.
+ * @param directory - `repository.directory` of the package; a package published
+ * from its own repository has none, so its files sit at the repository root.
  * @returns the repository-relative file, or undefined for CSS modules and escapes.
  */
-export function repositoryPathFor(region: string, directory: string): string | undefined {
+export function repositoryPathFor(region: string, directory = ''): string | undefined {
   if (region.startsWith('\0') || region.includes('\\0')) return undefined
   const own = /^(?:\.\/)?lib\/types\/(.+)\.js$/u.exec(region)
   const relative = own === null ? region : `src/${own[1]}.tsx`
   const path = posix.normalize(posix.join(directory, relative))
   return path.startsWith('..') || path.startsWith('/') ? undefined : path
+}
+
+/** Which repository and ref each marked package points at (npx mode). */
+export interface PublishedMarkOptions {
+  /** Repository of the harness packages, the only ones tagged `dsh-v<version>`. */
+  readonly harnessRepository?: string
+  /** Ref of that harness repository. */
+  readonly harnessRef?: string
+  /** Ref overrides for other packages, keyed by package name. */
+  readonly refs?: Record<string, string>
+  /** Manifest cache shared across requests. */
+  readonly origins?: Map<string, PackageOrigin>
+}
+
+/**
+ * The git ref one package's markers point at: the harness keeps its own
+ * `dsh-v…` tag, every other package follows the `v<version>` tag that npm
+ * release workflows push next to the published version, and `refs` overrides
+ * both. Undefined means the package cannot be linked and stays unmarked.
+ */
+function refFor(origin: PackageOrigin, options: PublishedMarkOptions): string | undefined {
+  const override = origin.name === undefined ? undefined : options.refs?.[origin.name]
+  if (override !== undefined) return override
+  if (origin.repository !== undefined && origin.repository === options.harnessRepository) return options.harnessRef
+  return origin.version === undefined ? undefined : `v${origin.version}`
 }
 
 /** Parse one combo script; undefined when Babel cannot recover a tree. */
@@ -354,33 +425,39 @@ function instrumentClientBundle(
 
 /**
  * Add Lovinsp DOM markers to one loader combo script from its `//#region`
- * markers (npx mode): the file is exact, the line is the compiled one.
- * Only packages published from `repository` get markers; a click on anything
- * else would open the wrong repository.
+ * markers (npx mode): the file is exact, the compiled line is not, so the
+ * marker carries a whole `…/blob/<ref>/<file>` URL and no line.
+ *
+ * Every package that declares a `repository` and an installed version is
+ * marked, each pointing at its own release — the combo script mixes harness
+ * packages with third-party plugins, and a single repository would send most
+ * clicks to the wrong project.
  */
 export function instrumentPublishedBundle(
   code: string,
   modules: ClientModulesReader,
   sourcePath: string,
-  repository: string,
-  origins: Map<string, PackageOrigin> = new Map(),
+  options: PublishedMarkOptions = {},
 ): string {
   const ast = parseBundle(code)
   if (ast === undefined) return code
   const ids = comboIds(sourcePath)
   const sections = scanCode(code, /__ModuleLoader__\.load\(\{\s*id:\s*"([^"]+)"/gu)
   const regions = scanCode(code, /^[ \t]*\/\/#region (.+?)[ \t]*$/gmu)
+  const origins = options.origins ?? new Map<string, PackageOrigin>()
   const output = new MagicString(code)
   eachDomJsxCall(ast, ({ tag, propsStart, line, column }) => {
     const sectionId = anchorAt(sections, line) ?? (ids.length === 1 ? ids[0] : undefined)
     if (sectionId === undefined) return
     const origin = packageOrigin(modules, sectionId, origins)
-    if (origin.repository !== repository || origin.directory === undefined) return
+    if (origin.repository === undefined) return
+    const ref = refFor(origin, options)
+    if (ref === undefined) return
     const region = anchorAt(regions, line)
     if (region === undefined) return
     const file = repositoryPathFor(region, origin.directory)
     if (file === undefined) return
-    const marker = `${file}:${String(line)}:${String(column + 1)}:${tag}`
+    const marker = `${origin.repository}/blob/${ref}/${file}:${String(line)}:${String(column + 1)}:${tag}`
     output.appendLeft(propsStart + 1, `${MARKER_ATTRIBUTE}:${JSON.stringify(marker)},`)
   })
   return output.toString()
@@ -398,7 +475,6 @@ async function serveInstrumentedPlugin(
   modules: ClientModulesReader,
   cache: Map<string, Buffer>,
   mode: InspectorMode,
-  origins: Map<string, PackageOrigin>,
 ): Promise<void> {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     res.writeHead(405).end()
@@ -424,7 +500,7 @@ async function serveInstrumentedPlugin(
       body = Buffer.from(source)
       contentType = 'application/json'
     } else if (mode.kind === 'npx') {
-      body = Buffer.from(instrumentPublishedBundle(source, modules, originalPath, mode.repository, origins))
+      body = Buffer.from(instrumentPublishedBundle(source, modules, originalPath, mode.marks))
     } else {
       const mapPath = /\/\/# sourceMappingURL=([^\s]+)/u.exec(source)?.[1]
       if (mapPath === undefined) body = Buffer.from(source)
@@ -631,10 +707,15 @@ export function detectHarnessRef(entry: string | undefined = process.argv[1]): s
   return 'master'
 }
 
-/** Build the inlined overlay for npx mode: copy path or open the file on GitHub, never a local editor. */
-export async function overlayScript(config: Config, ref: string): Promise<string> {
+/**
+ * Build the inlined overlay for npx mode: copy the source URL or open it on
+ * GitHub, never a local editor. Each marker already holds the full
+ * `…/blob/<ref>/<file>` URL of its own package, so both actions are `{file}`
+ * — the compiled line would point at the wrong place in the source file and
+ * is deliberately left out.
+ */
+export async function overlayScript(config: Config): Promise<string> {
   const { getWebComponentCode } = await import('@lovinsp/core')
-  const repository = (config.repository ?? HARNESS_REPOSITORY).replace(/\/$/u, '')
   const port = config.port ?? 5678
   const script = getWebComponentCode({
     bundler: 'vite',
@@ -644,8 +725,8 @@ export async function overlayScript(config: Config, ref: string): Promise<string
     editor: config.editor,
     behavior: {
       locate: false,
-      copy: true,
-      target: `${repository}/blob/${ref}/{file}`,
+      copy: '{file}',
+      target: '{file}',
       defaultAction: 'copy',
       // Lovinsp ignores `hotKeys` outright once any per-action chord is set, and
       // matches each chord on the exact modifier set. Both actions must be
@@ -661,7 +742,7 @@ export async function overlayScript(config: Config, ref: string): Promise<string
   // but takes the target chord as one static list; give the GitHub jump the
   // same per-platform chord so the documented shortcut holds in both modes.
   const perPlatform = "(/mac|iphone|ipad|ipod/i.test(navigator.userAgent)) ? 'shiftKey,altKey,metaKey' : 'shiftKey,altKey,ctrlKey'"
-  return script.replace(/inspector\.targetKeys = '[^']*';/u, `inspector.targetKeys = ${perPlatform};`) + hintBadge(ref)
+  return script.replace(/inspector\.targetKeys = '[^']*';/u, `inspector.targetKeys = ${perPlatform};`) + hintBadge()
 }
 
 /**
@@ -670,9 +751,9 @@ export async function overlayScript(config: Config, ref: string): Promise<string
  * plugin is inert. Non-interactive and self-retiring so it can never swallow a
  * click or sit on top of the app chrome.
  */
-function hintBadge(ref: string): string {
-  const mac = JSON.stringify(`源码定位 · 按住 ⇧⌥ 点击复制路径，再加 ⌘ 打开 GitHub ${ref}`)
-  const other = JSON.stringify(`源码定位 · 按住 Shift+Alt 点击复制路径，再加 Ctrl 打开 GitHub ${ref}`)
+function hintBadge(): string {
+  const mac = JSON.stringify('源码定位 · 按住 ⇧⌥ 点击复制源码链接，再加 ⌘ 在 GitHub 打开')
+  const other = JSON.stringify('源码定位 · 按住 Shift+Alt 点击复制源码链接，再加 Ctrl 在 GitHub 打开')
   return `
 ;(function () {
   if (typeof document === 'undefined') return
@@ -716,10 +797,14 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   let mode: InspectorMode
   let overlay = ''
   if (sourceRoot === undefined) {
-    const ref = config.sourceRef ?? detectHarnessRef()
-    mode = { kind: 'npx', repository: (config.repository ?? HARNESS_REPOSITORY).replace(/\/$/u, '') }
-    overlay = await overlayScript(config, ref)
-    console.info(`frontend-inspector: no harness checkout found, marking published bundles; clicks open ${mode.repository}/blob/${ref}`)
+    const harnessRepository = (config.repository ?? HARNESS_REPOSITORY).replace(/\/$/u, '')
+    const harnessRef = config.sourceRef ?? detectHarnessRef()
+    mode = {
+      kind: 'npx',
+      marks: { harnessRepository, harnessRef, refs: config.refs, origins: new Map() },
+    }
+    overlay = await overlayScript(config)
+    console.info(`frontend-inspector: no harness checkout found, marking published bundles; every plugin links to its own repository, the harness to ${harnessRepository}/blob/${harnessRef}`)
   } else {
     mode = { kind: 'checkout' }
     await ctx.effect(async () => {
@@ -732,7 +817,6 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     httpCtx.effect(() => {
       const modules = httpCtx.get('clientModules') as ClientModulesReader
       const pluginCache = new Map<string, Buffer>()
-      const origins = new Map<string, PackageOrigin>()
       const removeRoute = mode.kind === 'checkout'
         ? httpCtx.webServer.register({
           kind: 'prefix',
@@ -746,7 +830,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         kind: 'prefix',
         path: PLUGIN_PATH,
         handler: async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-          await serveInstrumentedPlugin(req, res, httpCtx.webServer.port, modules, pluginCache, mode, origins)
+          await serveInstrumentedPlugin(req, res, httpCtx.webServer.port, modules, pluginCache, mode)
         },
       })
       const removeTap = httpCtx.webServer.tapIndex((html) => {
